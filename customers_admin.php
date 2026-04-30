@@ -74,19 +74,73 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'], $_POST['cus
             $_SESSION['error'] = 'Failed to unblock account.';
         }
     } elseif ($action === 'delete_account') {
-        $stmt = mysqli_prepare(
-            $conn,
-            "DELETE FROM customer WHERE customer_id = ? LIMIT 1"
-        );
-        if ($stmt) {
-            mysqli_stmt_bind_param($stmt, 'i', $customerId);
-            if (mysqli_stmt_execute($stmt) && mysqli_stmt_affected_rows($stmt) === 1) {
-                $_SESSION['success'] = 'Customer account deleted.';
-            } else {
-                $_SESSION['error'] = 'Could not delete this account (it may be referenced by existing orders).';
-            }
+        $confirmText = trim((string)($_POST['confirm_delete'] ?? ''));
+        if ($confirmText !== 'DELETE') {
+            $_SESSION['error'] = 'Type DELETE to permanently delete this customer account and related records.';
         } else {
-            $_SESSION['error'] = 'Failed to prepare account deletion.';
+            mysqli_begin_transaction($conn);
+            try {
+                $orderIds = [];
+                $orderSql = "SELECT order_id, status FROM `order` WHERE customer_id = ? FOR UPDATE";
+                $orderStmt = mysqli_prepare($conn, $orderSql);
+                if (!$orderStmt) {
+                    throw new Exception('Unable to load customer orders.');
+                }
+                mysqli_stmt_bind_param($orderStmt, 'i', $customerId);
+                mysqli_stmt_execute($orderStmt);
+                $orderRes = mysqli_stmt_get_result($orderStmt);
+                while ($order = mysqli_fetch_assoc($orderRes)) {
+                    $orderId = (int)$order['order_id'];
+                    $orderIds[] = $orderId;
+                    if (in_array($order['status'], ['PENDING', 'PROCESSING'], true)) {
+                        restockOrderItems($orderId, 'Customer account deleted; order #' . $orderId . ' removed');
+                    }
+                }
+
+                $deleteOrdersStmt = mysqli_prepare($conn, "DELETE FROM `order` WHERE customer_id = ?");
+                if (!$deleteOrdersStmt) {
+                    throw new Exception('Unable to delete customer orders.');
+                }
+                mysqli_stmt_bind_param($deleteOrdersStmt, 'i', $customerId);
+                if (!mysqli_stmt_execute($deleteOrdersStmt)) {
+                    throw new Exception('Unable to delete customer orders.');
+                }
+
+                $deleteStatements = [
+                    "DELETE FROM cart WHERE customer_id = ?",
+                    "DELETE FROM review WHERE customer_id = ?",
+                    "DELETE FROM wishlist WHERE customer_id = ?",
+                    "DELETE FROM bodymeasurement WHERE customer_id = ?",
+                    "DELETE FROM address WHERE customer_id = ?",
+                    "DELETE FROM return_request WHERE customer_id = ?",
+                ];
+                foreach ($deleteStatements as $deleteSql) {
+                    $deleteStmt = mysqli_prepare($conn, $deleteSql);
+                    if (!$deleteStmt) {
+                        throw new Exception('Unable to prepare customer cleanup.');
+                    }
+                    mysqli_stmt_bind_param($deleteStmt, 'i', $customerId);
+                    if (!mysqli_stmt_execute($deleteStmt)) {
+                        throw new Exception('Unable to delete related customer records.');
+                    }
+                }
+
+                $customerStmt = mysqli_prepare($conn, "DELETE FROM customer WHERE customer_id = ? LIMIT 1");
+                if (!$customerStmt) {
+                    throw new Exception('Unable to prepare customer deletion.');
+                }
+                mysqli_stmt_bind_param($customerStmt, 'i', $customerId);
+                if (!mysqli_stmt_execute($customerStmt) || mysqli_stmt_affected_rows($customerStmt) !== 1) {
+                    throw new Exception('Customer account was not deleted.');
+                }
+
+                mysqli_commit($conn);
+                $_SESSION['success'] = 'Customer account permanently deleted with related cart, order, review, wishlist, address, return, and measurement records.';
+            } catch (Throwable $e) {
+                mysqli_rollback($conn);
+                error_log('Customer hard delete failed: ' . $e->getMessage());
+                $_SESSION['error'] = 'Could not delete this customer account. Related records were left unchanged.';
+            }
         }
     } elseif ($action === 'set_temp_password') {
         $tempPassword = $_POST['temp_password'] ?? '';
@@ -267,10 +321,12 @@ $result = mysqli_query($conn, $sql);
                     </form>
 
                     <form method="POST" style="display:inline-block;margin:0 .3rem .3rem 0;"
-                          onsubmit="return confirm('Delete this customer account? This is permanent.');">
+                          onsubmit="return confirm('Permanently delete this customer and all related orders, carts, reviews, wishlist, addresses, returns, and measurements? This cannot be undone.');">
                         <?php echo csrfInput(); ?>
                         <input type="hidden" name="action" value="delete_account">
                         <input type="hidden" name="customer_id" value="<?php echo (int)$row['customer_id']; ?>">
+                        <input type="text" name="confirm_delete" placeholder="Type DELETE" required
+                               style="padding:.35rem .5rem;border-radius:8px;border:1px solid #374151;background:#0f172a;color:#e5e7eb;width:110px;">
                         <button type="submit" style="background:#991b1b;color:#fff;border:none;border-radius:8px;padding:.35rem .6rem;cursor:pointer;">Delete</button>
                     </form>
                 <?php else: ?>
