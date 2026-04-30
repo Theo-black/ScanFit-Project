@@ -47,7 +47,15 @@ if (!$profile) {
 
 $authError = null;
 if ($mode === 'signup') {
-    $pendingSignupId = createPendingGoogleSignupFromGoogle($profile, $authError);
+    $termsAcceptance = $_SESSION['google_signup_terms_acceptance'] ?? null;
+    unset($_SESSION['google_signup_terms_acceptance']);
+    if (!is_array($termsAcceptance) || empty($termsAcceptance['version'])) {
+        $_SESSION['error'] = 'Please agree to the ScanFit License Agreement and Terms & Conditions before signing up with Google.';
+        header('Location: register.php');
+        exit();
+    }
+
+    $pendingSignupId = createPendingGoogleSignupFromGoogle($profile, $termsAcceptance, $authError);
     if (!$pendingSignupId) {
         $_SESSION['error'] = $authError ?: 'Google sign up failed. Please try again.';
         header('Location: ' . $fallback);

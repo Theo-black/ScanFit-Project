@@ -28,6 +28,28 @@ if (session_status() === PHP_SESSION_NONE) {
 // Use the single, shared DB connection
 require_once 'Connectdb.php';   // must define $conn (mysqli)
 
+function ensureColumns(string $tableName, array $columns): void
+{
+    global $conn;
+
+    $escapedTable = mysqli_real_escape_string($conn, $tableName);
+    foreach ($columns as $columnName => $alterSql) {
+        $escapedColumn = mysqli_real_escape_string($conn, (string)$columnName);
+        $checkSql = "
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_schema = DATABASE()
+              AND table_name = '{$escapedTable}'
+              AND column_name = '{$escapedColumn}'
+            LIMIT 1
+        ";
+        $res = mysqli_query($conn, $checkSql);
+        if ($res && mysqli_num_rows($res) === 0) {
+            @mysqli_query($conn, $alterSql);
+        }
+    }
+}
+
 function ensureCustomerSecurityColumns(): void
 {
     static $checked = false;
@@ -51,6 +73,10 @@ function ensureCustomerSecurityColumns(): void
         'email_verified' => "ALTER TABLE customer ADD COLUMN email_verified TINYINT(1) NOT NULL DEFAULT 0",
         'email_verification_token' => "ALTER TABLE customer ADD COLUMN email_verification_token VARCHAR(255) DEFAULT NULL",
         'email_verification_expires_at' => "ALTER TABLE customer ADD COLUMN email_verification_expires_at DATETIME DEFAULT NULL",
+        'terms_version' => "ALTER TABLE customer ADD COLUMN terms_version VARCHAR(32) DEFAULT NULL",
+        'terms_accepted_at' => "ALTER TABLE customer ADD COLUMN terms_accepted_at DATETIME DEFAULT NULL",
+        'terms_accepted_ip' => "ALTER TABLE customer ADD COLUMN terms_accepted_ip VARCHAR(45) DEFAULT NULL",
+        'terms_accepted_user_agent' => "ALTER TABLE customer ADD COLUMN terms_accepted_user_agent VARCHAR(255) DEFAULT NULL",
     ];
 
     foreach ($requiredColumns as $columnName => $alterSql) {
@@ -100,6 +126,12 @@ function ensureCustomerSecurityColumns(): void
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
     ";
     @mysqli_query($conn, $pendingGoogleSignupTableSql);
+    ensureColumns('pending_google_signup', [
+        'terms_version' => "ALTER TABLE pending_google_signup ADD COLUMN terms_version VARCHAR(32) DEFAULT NULL",
+        'terms_accepted_at' => "ALTER TABLE pending_google_signup ADD COLUMN terms_accepted_at DATETIME DEFAULT NULL",
+        'terms_accepted_ip' => "ALTER TABLE pending_google_signup ADD COLUMN terms_accepted_ip VARCHAR(45) DEFAULT NULL",
+        'terms_accepted_user_agent' => "ALTER TABLE pending_google_signup ADD COLUMN terms_accepted_user_agent VARCHAR(255) DEFAULT NULL",
+    ]);
 
     $pendingCustomerSignupTableSql = "
         CREATE TABLE IF NOT EXISTS pending_customer_signup (
@@ -118,6 +150,12 @@ function ensureCustomerSecurityColumns(): void
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
     ";
     @mysqli_query($conn, $pendingCustomerSignupTableSql);
+    ensureColumns('pending_customer_signup', [
+        'terms_version' => "ALTER TABLE pending_customer_signup ADD COLUMN terms_version VARCHAR(32) DEFAULT NULL",
+        'terms_accepted_at' => "ALTER TABLE pending_customer_signup ADD COLUMN terms_accepted_at DATETIME DEFAULT NULL",
+        'terms_accepted_ip' => "ALTER TABLE pending_customer_signup ADD COLUMN terms_accepted_ip VARCHAR(45) DEFAULT NULL",
+        'terms_accepted_user_agent' => "ALTER TABLE pending_customer_signup ADD COLUMN terms_accepted_user_agent VARCHAR(255) DEFAULT NULL",
+    ]);
 
     $contactMessageTableSql = "
         CREATE TABLE IF NOT EXISTS contact_message (
@@ -407,6 +445,20 @@ ensureSupportedCountries();
 
 
 // ------------- BASIC AUTH HELPERS -------------
+
+function getTermsAgreementVersion(): string
+{
+    return '2026-04-30';
+}
+
+function getTermsAcceptanceMetadata(): array
+{
+    return [
+        'version' => getTermsAgreementVersion(),
+        'ip' => substr((string)($_SERVER['REMOTE_ADDR'] ?? ''), 0, 45),
+        'user_agent' => substr((string)($_SERVER['HTTP_USER_AGENT'] ?? ''), 0, 255),
+    ];
+}
 
 
 function isLoggedIn(): bool
@@ -1333,6 +1385,7 @@ function createPendingCustomerSignup(
     string $email,
     string $phone,
     string $passwordHash,
+    array $termsAcceptance,
     ?string &$error = null
 ): ?int {
     global $conn;
@@ -1352,7 +1405,14 @@ function createPendingCustomerSignup(
         $pendingId = (int)$existingPending['pending_customer_signup_id'];
         $updateSql = "
             UPDATE pending_customer_signup
-            SET first_name = ?, last_name = ?, phone = ?, password_hash = ?
+            SET first_name = ?,
+                last_name = ?,
+                phone = ?,
+                password_hash = ?,
+                terms_version = ?,
+                terms_accepted_at = NOW(),
+                terms_accepted_ip = ?,
+                terms_accepted_user_agent = ?
             WHERE pending_customer_signup_id = ?
             LIMIT 1
         ";
@@ -1361,7 +1421,10 @@ function createPendingCustomerSignup(
             $error = 'Unable to start registration right now.';
             return null;
         }
-        mysqli_stmt_bind_param($stmt, 'ssssi', $firstName, $lastName, $phone, $passwordHash, $pendingId);
+        $termsVersion = (string)($termsAcceptance['version'] ?? getTermsAgreementVersion());
+        $termsIp = (string)($termsAcceptance['ip'] ?? '');
+        $termsUserAgent = (string)($termsAcceptance['user_agent'] ?? '');
+        mysqli_stmt_bind_param($stmt, 'sssssssi', $firstName, $lastName, $phone, $passwordHash, $termsVersion, $termsIp, $termsUserAgent, $pendingId);
         if (!mysqli_stmt_execute($stmt)) {
             $error = 'Unable to start registration right now.';
             return null;
@@ -1370,15 +1433,19 @@ function createPendingCustomerSignup(
     }
 
     $insertSql = "
-        INSERT INTO pending_customer_signup (first_name, last_name, email, phone, password_hash, created_at)
-        VALUES (?, ?, ?, ?, ?, NOW())
+        INSERT INTO pending_customer_signup
+            (first_name, last_name, email, phone, password_hash, terms_version, terms_accepted_at, terms_accepted_ip, terms_accepted_user_agent, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, NOW(), ?, ?, NOW())
     ";
     $stmt = mysqli_prepare($conn, $insertSql);
     if (!$stmt) {
         $error = 'Unable to start registration right now.';
         return null;
     }
-    mysqli_stmt_bind_param($stmt, 'sssss', $firstName, $lastName, $email, $phone, $passwordHash);
+    $termsVersion = (string)($termsAcceptance['version'] ?? getTermsAgreementVersion());
+    $termsIp = (string)($termsAcceptance['ip'] ?? '');
+    $termsUserAgent = (string)($termsAcceptance['user_agent'] ?? '');
+    mysqli_stmt_bind_param($stmt, 'ssssssss', $firstName, $lastName, $email, $phone, $passwordHash, $termsVersion, $termsIp, $termsUserAgent);
     if (!mysqli_stmt_execute($stmt)) {
         $error = 'Unable to start registration right now.';
         return null;
@@ -1435,8 +1502,9 @@ function completePendingCustomerSignupByToken(string $token, ?string &$error = n
 
     try {
         $insertSql = "
-            INSERT INTO customer (first_name, last_name, email, phone, password_hash, email_verified, created_at)
-            VALUES (?, ?, ?, ?, ?, 1, NOW())
+            INSERT INTO customer
+                (first_name, last_name, email, phone, password_hash, email_verified, terms_version, terms_accepted_at, terms_accepted_ip, terms_accepted_user_agent, created_at)
+            VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, NOW())
         ";
         $insertStmt = mysqli_prepare($conn, $insertSql);
         if (!$insertStmt) {
@@ -1447,8 +1515,12 @@ function completePendingCustomerSignupByToken(string $token, ?string &$error = n
         $lastName = (string)($pending['last_name'] ?? '');
         $phone = (string)($pending['phone'] ?? '');
         $passwordHash = (string)($pending['password_hash'] ?? '');
+        $termsVersion = (string)($pending['terms_version'] ?? getTermsAgreementVersion());
+        $termsAcceptedAt = (string)($pending['terms_accepted_at'] ?? date('Y-m-d H:i:s'));
+        $termsIp = (string)($pending['terms_accepted_ip'] ?? '');
+        $termsUserAgent = (string)($pending['terms_accepted_user_agent'] ?? '');
 
-        mysqli_stmt_bind_param($insertStmt, 'sssss', $firstName, $lastName, $email, $phone, $passwordHash);
+        mysqli_stmt_bind_param($insertStmt, 'sssssssss', $firstName, $lastName, $email, $phone, $passwordHash, $termsVersion, $termsAcceptedAt, $termsIp, $termsUserAgent);
         if (!mysqli_stmt_execute($insertStmt)) {
             throw new RuntimeException('Unable to create customer.');
         }
@@ -1608,7 +1680,7 @@ function findPendingGoogleSignupByGoogleSub(string $googleSub): ?array
     return mysqli_fetch_assoc($res) ?: null;
 }
 
-function createPendingGoogleSignupFromGoogle(array $profile, ?string &$error = null): ?int
+function createPendingGoogleSignupFromGoogle(array $profile, array $termsAcceptance, ?string &$error = null): ?int
 {
     global $conn;
 
@@ -1661,7 +1733,15 @@ function createPendingGoogleSignupFromGoogle(array $profile, ?string &$error = n
         $pendingId = (int)$existingPending['pending_google_signup_id'];
         $updateSql = "
             UPDATE pending_google_signup
-            SET first_name = ?, last_name = ?, email = ?, google_sub = ?, password_hash = ?
+            SET first_name = ?,
+                last_name = ?,
+                email = ?,
+                google_sub = ?,
+                password_hash = ?,
+                terms_version = ?,
+                terms_accepted_at = NOW(),
+                terms_accepted_ip = ?,
+                terms_accepted_user_agent = ?
             WHERE pending_google_signup_id = ?
             LIMIT 1
         ";
@@ -1670,7 +1750,10 @@ function createPendingGoogleSignupFromGoogle(array $profile, ?string &$error = n
             $error = 'Unable to start Google sign up at this time.';
             return null;
         }
-        mysqli_stmt_bind_param($stmt, 'sssssi', $firstName, $lastName, $email, $googleSub, $passwordHash, $pendingId);
+        $termsVersion = (string)($termsAcceptance['version'] ?? getTermsAgreementVersion());
+        $termsIp = (string)($termsAcceptance['ip'] ?? '');
+        $termsUserAgent = (string)($termsAcceptance['user_agent'] ?? '');
+        mysqli_stmt_bind_param($stmt, 'ssssssssi', $firstName, $lastName, $email, $googleSub, $passwordHash, $termsVersion, $termsIp, $termsUserAgent, $pendingId);
         if (!mysqli_stmt_execute($stmt)) {
             $error = 'Unable to start Google sign up at this time.';
             return null;
@@ -1679,15 +1762,19 @@ function createPendingGoogleSignupFromGoogle(array $profile, ?string &$error = n
     }
 
     $insertSql = "
-        INSERT INTO pending_google_signup (first_name, last_name, email, google_sub, password_hash, created_at)
-        VALUES (?, ?, ?, ?, ?, NOW())
+        INSERT INTO pending_google_signup
+            (first_name, last_name, email, google_sub, password_hash, terms_version, terms_accepted_at, terms_accepted_ip, terms_accepted_user_agent, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, NOW(), ?, ?, NOW())
     ";
     $stmt = mysqli_prepare($conn, $insertSql);
     if (!$stmt) {
         $error = 'Unable to start Google sign up at this time.';
         return null;
     }
-    mysqli_stmt_bind_param($stmt, 'sssss', $firstName, $lastName, $email, $googleSub, $passwordHash);
+    $termsVersion = (string)($termsAcceptance['version'] ?? getTermsAgreementVersion());
+    $termsIp = (string)($termsAcceptance['ip'] ?? '');
+    $termsUserAgent = (string)($termsAcceptance['user_agent'] ?? '');
+    mysqli_stmt_bind_param($stmt, 'ssssssss', $firstName, $lastName, $email, $googleSub, $passwordHash, $termsVersion, $termsIp, $termsUserAgent);
     if (!mysqli_stmt_execute($stmt)) {
         $error = 'Unable to start Google sign up at this time.';
         return null;
@@ -1745,8 +1832,9 @@ function completePendingGoogleSignupByToken(string $token, ?string &$error = nul
 
     try {
         $insertSql = "
-            INSERT INTO customer (first_name, last_name, email, phone, password_hash, google_sub, email_verified, created_at)
-            VALUES (?, ?, ?, NULL, ?, ?, 1, NOW())
+            INSERT INTO customer
+                (first_name, last_name, email, phone, password_hash, google_sub, email_verified, terms_version, terms_accepted_at, terms_accepted_ip, terms_accepted_user_agent, created_at)
+            VALUES (?, ?, ?, NULL, ?, ?, 1, ?, ?, ?, ?, NOW())
         ";
         $insertStmt = mysqli_prepare($conn, $insertSql);
         if (!$insertStmt) {
@@ -1759,8 +1847,12 @@ function completePendingGoogleSignupByToken(string $token, ?string &$error = nul
         if ($passwordHash === '') {
             $passwordHash = randomOAuthPasswordHash();
         }
+        $termsVersion = (string)($pending['terms_version'] ?? getTermsAgreementVersion());
+        $termsAcceptedAt = (string)($pending['terms_accepted_at'] ?? date('Y-m-d H:i:s'));
+        $termsIp = (string)($pending['terms_accepted_ip'] ?? '');
+        $termsUserAgent = (string)($pending['terms_accepted_user_agent'] ?? '');
 
-        mysqli_stmt_bind_param($insertStmt, 'sssss', $firstName, $lastName, $email, $passwordHash, $googleSub);
+        mysqli_stmt_bind_param($insertStmt, 'sssssssss', $firstName, $lastName, $email, $passwordHash, $googleSub, $termsVersion, $termsAcceptedAt, $termsIp, $termsUserAgent);
         if (!mysqli_stmt_execute($insertStmt)) {
             throw new RuntimeException('Unable to create customer.');
         }

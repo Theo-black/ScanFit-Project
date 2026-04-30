@@ -34,6 +34,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $phone = trim($_POST['phone'] ?? '');
     $password = $_POST['password'] ?? '';
     $confirmPassword = $_POST['confirm_password'] ?? '';
+    $acceptedTerms = isset($_POST['accept_terms']) && $_POST['accept_terms'] === '1';
 
     // Basic required field validation
     if (empty($firstName) || empty($lastName) || empty($email) || empty($password)) {
@@ -46,10 +47,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     // Enforce minimum password length
     } elseif (strlen($password) < 6) {
         $error = 'Password must be at least 6 characters';
+    } elseif (!$acceptedTerms) {
+        $error = 'You must agree to the ScanFit License Agreement and Terms & Conditions to create an account.';
     } else {
         $passwordHash = password_hash($password, PASSWORD_DEFAULT);
         $signupError = null;
-        $pendingSignupId = createPendingCustomerSignup($firstName, $lastName, $email, $phone, $passwordHash, $signupError);
+        $pendingSignupId = createPendingCustomerSignup($firstName, $lastName, $email, $phone, $passwordHash, getTermsAcceptanceMetadata(), $signupError);
 
         if (!$pendingSignupId) {
             $error = $signupError ?: 'Registration failed. Please try again.';
@@ -141,6 +144,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             text-decoration:none;color:#2c3e50;font-weight:700;background:#fff
         }
         .google-btn:hover{background:#f8fafc}
+        .terms-box{
+            display:flex;gap:.65rem;align-items:flex-start;margin:1rem 0 1.4rem;
+            padding:.9rem;border:1px solid #e1e4e8;border-radius:12px;background:#f8fafc;
+            color:#334155;font-size:.92rem;line-height:1.45
+        }
+        .terms-box input{width:auto;margin-top:.2rem;flex:0 0 auto}
+        .terms-box a{color:#667eea;font-weight:700;text-decoration:none}
+        .terms-box a:hover{text-decoration:underline}
         /* Existing account login text */
         .login-link{
             text-align:center;margin-top:1.5rem;color:#666
@@ -217,12 +228,31 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 <input type="password" name="confirm_password" placeholder="Re-enter your password" required>
             </div>
 
+            <label class="terms-box">
+                <input type="checkbox" name="accept_terms" value="1" required <?php echo !empty($_POST['accept_terms']) ? 'checked' : ''; ?>>
+                <span>
+                    I have read and agree to the
+                    <a href="terms.php" target="_blank" rel="noopener">ScanFit License Agreement and Terms &amp; Conditions</a>.
+                </span>
+            </label>
+
             <!-- Submit button to create the account -->
             <button type="submit" class="submit-btn">Create Account</button>
-            <?php if (isGoogleOAuthConfigured()): ?>
-                <a href="google_login.php?mode=signup" class="google-btn">Sign up with Google</a>
-            <?php endif; ?>
         </form>
+
+        <?php if (isGoogleOAuthConfigured()): ?>
+            <form method="POST" action="google_login.php?mode=signup">
+                <?php echo csrfInput(); ?>
+                <label class="terms-box">
+                    <input type="checkbox" name="accept_terms" value="1" required>
+                    <span>
+                        I have read and agree to the
+                        <a href="terms.php" target="_blank" rel="noopener">ScanFit License Agreement and Terms &amp; Conditions</a>.
+                    </span>
+                </label>
+                <button type="submit" class="google-btn">Sign up with Google</button>
+            </form>
+        <?php endif; ?>
 
         <!-- Link to login page for existing users -->
         <div class="login-link">

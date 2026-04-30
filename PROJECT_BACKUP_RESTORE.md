@@ -7,6 +7,7 @@ This file gives you a repeatable backup and restore workflow for the full local 
 - `.env`
 - MySQL database
 - local AI scanner files
+- ecommerce workflow files for Stripe checkout, coupons, wishlist, order tracking, refunds, returns, reviews, and catalog settings
 
 This project expects:
 
@@ -28,6 +29,7 @@ Excluded from the copied project tree:
 - `.git`
 - `.venv311`
 - `__pycache__`
+- `storage\sessions\sess_*`
 
 Those are rebuilt during restore.
 
@@ -77,7 +79,7 @@ $dbUser = if ($envMap.ContainsKey("SCANFIT_DB_USER")) { $envMap["SCANFIT_DB_USER
 $dbPass = if ($envMap.ContainsKey("SCANFIT_DB_PASS")) { $envMap["SCANFIT_DB_PASS"] } else { "" }
 $dbName = if ($envMap.ContainsKey("SCANFIT_DB_NAME")) { $envMap["SCANFIT_DB_NAME"] } else { "capstonestoredb" }
 
-robocopy $projectRoot $projectBackup /MIR /XD ".git" ".venv311" "__pycache__" | Out-Null
+robocopy $projectRoot $projectBackup /MIR /XD ".git" ".venv311" "__pycache__" /XF "sess_*" | Out-Null
 
 $dbDumpPath = Join-Path $dbBackupDir "$dbName.sql"
 $dumpArgs = @(
@@ -157,10 +159,10 @@ if (-not (Test-Path $projectBackup)) {
 }
 
 if (Test-Path $restoreRoot) {
-    robocopy $projectBackup $restoreRoot /MIR /XD ".venv311" "__pycache__" | Out-Null
+    robocopy $projectBackup $restoreRoot /MIR /XD ".venv311" "__pycache__" /XF "sess_*" | Out-Null
 } else {
     New-Item -ItemType Directory -Force -Path $restoreRoot | Out-Null
-    robocopy $projectBackup $restoreRoot /MIR /XD ".venv311" "__pycache__" | Out-Null
+    robocopy $projectBackup $restoreRoot /MIR /XD ".venv311" "__pycache__" /XF "sess_*" | Out-Null
 }
 
 $envFile = Join-Path $restoreRoot ".env"
@@ -269,8 +271,12 @@ SCANFIT_DB_USER=root
 SCANFIT_DB_PASS=
 SCANFIT_DB_NAME=capstonestoredb
 SCANFIT_APP_URL=http://localhost/ScanFit
+SCANFIT_FLAT_SHIPPING_USD=5.00
+SCANFIT_TAX_RATE=0.10
+SCANFIT_LOW_STOCK_THRESHOLD=5
 SCANFIT_MAIL_FROM=no-reply@example.com
 SCANFIT_MAIL_FROM_NAME=ScanFit
+SCANFIT_ADMIN_NOTIFY_EMAIL=
 SCANFIT_SMTP_HOST=smtp.gmail.com
 SCANFIT_SMTP_PORT=587
 SCANFIT_SMTP_ENCRYPTION=tls
@@ -280,6 +286,9 @@ SCANFIT_GOOGLE_CLIENT_ID=
 SCANFIT_GOOGLE_CLIENT_SECRET=
 SCANFIT_GOOGLE_REDIRECT_URI=
 SCANFIT_CA_BUNDLE=
+SCANFIT_STRIPE_SECRET_KEY=
+SCANFIT_STRIPE_WEBHOOK_SECRET=
+SCANFIT_STRIPE_CURRENCY=usd
 ```
 
 Optional scanner API values if you ever use remote FitXpress:
@@ -292,9 +301,13 @@ SCANFIT_FITXPRESS_BASE_URL=https://backend.fitxpress.3dlook.me/api/1.0/
 ## 6. Important Notes
 
 - The actual default database name in code is `capstonestoredb`.
-- The checked-in `.env.example` currently shows `capstonestore_db`, which does not match the code default.
+- Make sure `.env` uses the database you restored. The project default is `capstonestoredb`.
 - Your backup includes uploaded images because the `images\` folder is copied.
 - The Python virtual environment is intentionally rebuilt during restore.
+- Runtime session files under `storage\sessions\sess_*` are temporary and should not be backed up. Keep `storage\sessions\.htaccess`.
+- After restore, the app bootstraps missing support tables/columns for payments, fulfillment, reviews, wishlist, coupons, returns, countries, and customer security fields. A restored database dump is still preferred because it preserves real order/customer data.
+- Stripe local testing needs test keys in `.env`, a reachable `SCANFIT_APP_URL`, and webhook forwarding to `stripe_webhook.php` if you want automatic payment completion from webhooks.
+- Countries are seeded at runtime, including Jamaica (`JM`) and other supported shipping countries.
 - The local scanner depends on:
 
 ```text
@@ -313,5 +326,19 @@ torch
 4. Restart WAMP.
 5. Rebuild `.venv311`.
 6. Start `local_body_scanner_service.py`.
-7. Open `http://localhost/ScanFit`.
+7. Confirm `storage\sessions\.htaccess` exists and `storage\sessions` is writable.
+8. Open `http://localhost/ScanFit`.
+9. Test login, cart, checkout, orders, admin fulfillment, coupons, reviews, returns, and wishlist.
 
+## 8. Post-Restore Ecommerce Checks
+
+After the app opens, run these checks in the browser:
+
+1. Customer account: register, verify/login, update settings.
+2. Product flow: browse Men/Women/Accessories, filter products, open product details.
+3. Cart flow: add item, update quantity, apply/remove coupon.
+4. Checkout flow: place COD order and, if Stripe keys are configured, test Stripe card checkout.
+5. Admin flow: open dashboard, products, catalog settings, coupons, orders, returns.
+6. Fulfillment flow: mark an order processing, shipped with carrier/tracking, then delivered.
+7. Customer after-delivery flow: view receipt, submit review, submit return request.
+8. Refund flow: use Stripe refund only on completed Stripe payments.
