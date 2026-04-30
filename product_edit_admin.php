@@ -171,6 +171,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     }
                 }
 
+                if (!saveProductImageUpload($_FILES['product_image'] ?? [], $sku, $imageError)) {
+                    throw new Exception($imageError ?? 'Could not save product image.');
+                }
+                if (
+                    (($_FILES['product_image']['error'] ?? UPLOAD_ERR_NO_FILE) === UPLOAD_ERR_NO_FILE) &&
+                    $sku !== (string)$product['sku']
+                ) {
+                    $oldImage = __DIR__ . DIRECTORY_SEPARATOR . 'images' . DIRECTORY_SEPARATOR . preg_replace('/[^A-Za-z0-9._-]/', '', (string)$product['sku']) . '.jpg';
+                    $newImage = __DIR__ . DIRECTORY_SEPARATOR . 'images' . DIRECTORY_SEPARATOR . preg_replace('/[^A-Za-z0-9._-]/', '', $sku) . '.jpg';
+                    if (is_file($oldImage) && !is_file($newImage)) {
+                        @rename($oldImage, $newImage);
+                    }
+                }
+
                 mysqli_commit($conn);
                 header('Location: products_admin.php');
                 exit();
@@ -405,7 +419,7 @@ $availableSizesList = implode(', ', array_keys($availableSizeNames));
         <div class="msg msg-success"><?php echo htmlspecialchars($success); ?></div>
     <?php endif; ?>
 
-    <form method="POST">
+    <form method="POST" enctype="multipart/form-data">
         <?php echo csrfInput(); ?>
         <input type="hidden" name="form_action" value="update_product">
         <div class="form-group">
@@ -436,6 +450,18 @@ $availableSizesList = implode(', ', array_keys($availableSizeNames));
         <div class="form-group">
             <label>Description</label>
             <textarea name="description"><?php echo htmlspecialchars((string)$product['description']); ?></textarea>
+        </div>
+
+        <div class="form-group">
+            <label>Product Image</label>
+            <div style="margin:.4rem 0;">
+                <img src="images/<?php echo htmlspecialchars((string)$product['sku']); ?>.jpg"
+                     alt="Current product image"
+                     style="max-width:180px;border-radius:10px;background:#111827;"
+                     onerror="this.style.display='none';">
+            </div>
+            <input type="file" name="product_image" accept="image/jpeg">
+            <small class="field-note">Upload a JPEG image to replace images/<?php echo htmlspecialchars((string)$product['sku']); ?>.jpg.</small>
         </div>
 
         <div class="form-group">

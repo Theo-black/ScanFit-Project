@@ -5,6 +5,57 @@ requireAdminRole(['SUPER_ADMIN', 'ADMIN', 'MODERATOR']);
 
 $admin = getCurrentAdmin();
 $unreadContactMessages = getUnreadContactMessageCount();
+global $conn;
+
+$pendingOrders = 0;
+$processingOrders = 0;
+$completedRevenue = 0.0;
+$lowStockThreshold = getLowStockThreshold();
+$lowStockVariants = [];
+$requestedReturns = 0;
+
+$orderStatsRes = mysqli_query(
+    $conn,
+    "SELECT
+        SUM(status = 'PENDING') AS pending_orders,
+        SUM(status = 'PROCESSING') AS processing_orders,
+        SUM(status IN ('PROCESSING','SHIPPED','DELIVERED')) AS active_orders,
+        SUM(CASE WHEN status IN ('PROCESSING','SHIPPED','DELIVERED') THEN total_amount ELSE 0 END) AS revenue
+     FROM `order`"
+);
+if ($orderStatsRes) {
+    $orderStats = mysqli_fetch_assoc($orderStatsRes) ?: [];
+    $pendingOrders = (int)($orderStats['pending_orders'] ?? 0);
+    $processingOrders = (int)($orderStats['processing_orders'] ?? 0);
+    $completedRevenue = (float)($orderStats['revenue'] ?? 0);
+}
+
+$returnStatsRes = mysqli_query($conn, "SELECT COUNT(*) AS requested_returns FROM return_request WHERE status = 'REQUESTED'");
+if ($returnStatsRes) {
+    $returnStats = mysqli_fetch_assoc($returnStatsRes) ?: [];
+    $requestedReturns = (int)($returnStats['requested_returns'] ?? 0);
+}
+
+$lowStockSql = "
+    SELECT p.name, pv.sku, pv.stock_quantity, s.name AS size_name, c.name AS colour_name
+    FROM productvariant pv
+    INNER JOIN product p ON pv.product_id = p.product_id
+    LEFT JOIN size s ON pv.size_id = s.size_id
+    LEFT JOIN colour c ON pv.colour_id = c.colour_id
+    WHERE p.status = 'ACTIVE'
+      AND pv.stock_quantity <= ?
+    ORDER BY pv.stock_quantity ASC, p.name ASC
+    LIMIT 8
+";
+$lowStockStmt = mysqli_prepare($conn, $lowStockSql);
+if ($lowStockStmt) {
+    mysqli_stmt_bind_param($lowStockStmt, 'i', $lowStockThreshold);
+    mysqli_stmt_execute($lowStockStmt);
+    $lowStockRes = mysqli_stmt_get_result($lowStockStmt);
+    while ($row = mysqli_fetch_assoc($lowStockRes)) {
+        $lowStockVariants[] = $row;
+    }
+}
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -45,6 +96,12 @@ $unreadContactMessages = getUnreadContactMessageCount();
         .card-link{font-size:.85rem;margin-top:1rem}
         .card-link a{color:#38bdf8;text-decoration:none}
         .card-link a:hover{text-decoration:underline}
+        .alert-list{margin-top:2rem;background:#020617;border:1px solid #1f2937;border-radius:16px;padding:1.2rem}
+        .alert-list h2{font-size:1.15rem;margin-bottom:.85rem}
+        .alert-row{display:grid;grid-template-columns:1fr auto;gap:1rem;padding:.7rem 0;border-top:1px solid #111827}
+        .alert-row:first-of-type{border-top:none}
+        .alert-meta{font-size:.82rem;color:#9ca3af;margin-top:.2rem}
+        .alert-count{font-weight:800;color:#fbbf24}
         @media(max-width:768px){
             .topbar{flex-direction:column;align-items:flex-start;gap:.85rem}
             .topbar-actions{width:100%;justify-content:space-between}
@@ -80,9 +137,34 @@ $unreadContactMessages = getUnreadContactMessageCount();
             <div class="card-link"><a href="products_admin.php">Go to products -></a></div>
         </div>
         <div class="card">
+            <div class="card-title">Catalog Settings</div>
+            <div class="card-value">Reference data</div>
+            <div class="card-link"><a href="catalog_settings_admin.php">Manage settings -></a></div>
+        </div>
+        <div class="card">
+            <div class="card-title">Coupons</div>
+            <div class="card-value">Discount codes</div>
+            <div class="card-link"><a href="coupons_admin.php">Manage coupons -></a></div>
+        </div>
+        <div class="card">
             <div class="card-title">Orders</div>
-            <div class="card-value">View all orders</div>
+            <div class="card-value"><?php echo $pendingOrders; ?> pending</div>
             <div class="card-link"><a href="orders_admin.php">Go to orders -></a></div>
+        </div>
+        <div class="card">
+            <div class="card-title">Processing</div>
+            <div class="card-value"><?php echo $processingOrders; ?> orders</div>
+            <div class="card-link"><a href="orders_admin.php">Review fulfillment -></a></div>
+        </div>
+        <div class="card">
+            <div class="card-title">Returns</div>
+            <div class="card-value"><?php echo $requestedReturns; ?> requested</div>
+            <div class="card-link"><a href="returns_admin.php">Review returns -></a></div>
+        </div>
+        <div class="card">
+            <div class="card-title">Revenue</div>
+            <div class="card-value">$<?php echo number_format($completedRevenue, 2); ?></div>
+            <div class="card-link"><a href="orders_admin.php">View order history -></a></div>
         </div>
         <div class="card">
             <div class="card-title">Customers</div>
@@ -99,6 +181,31 @@ $unreadContactMessages = getUnreadContactMessageCount();
             <div class="card-value">Admin settings</div>
             <div class="card-link"><a href="admin_profile.php">Edit profile -></a></div>
         </div>
+    </div>
+
+    <div class="alert-list">
+        <h2>Low Stock</h2>
+        <?php if (empty($lowStockVariants)): ?>
+            <div class="alert-meta">No active variants at or below <?php echo $lowStockThreshold; ?> units.</div>
+        <?php else: ?>
+            <?php foreach ($lowStockVariants as $variant): ?>
+                <div class="alert-row">
+                    <div>
+                        <strong><?php echo htmlspecialchars((string)$variant['name']); ?></strong>
+                        <div class="alert-meta">
+                            <?php echo htmlspecialchars((string)$variant['sku']); ?>
+                            <?php if (!empty($variant['size_name'])): ?>
+                                | <?php echo htmlspecialchars((string)$variant['size_name']); ?>
+                            <?php endif; ?>
+                            <?php if (!empty($variant['colour_name'])): ?>
+                                | <?php echo htmlspecialchars((string)$variant['colour_name']); ?>
+                            <?php endif; ?>
+                        </div>
+                    </div>
+                    <div class="alert-count"><?php echo (int)$variant['stock_quantity']; ?> left</div>
+                </div>
+            <?php endforeach; ?>
+        <?php endif; ?>
     </div>
 </div>
 </body>

@@ -4,6 +4,7 @@
 require_once 'functions.php';
 requireAdminRole(['SUPER_ADMIN', 'ADMIN', 'MODERATOR']);
 global $conn;
+releaseExpiredStripeCheckoutOrders();
 
 $successMsg = $_SESSION['success'] ?? null;
 $errorMsg   = $_SESSION['error'] ?? null;
@@ -11,9 +12,10 @@ unset($_SESSION['success'], $_SESSION['error']);
 
 // Fetch orders with customer name and totals
 $sql = "
-    SELECT o.*, c.first_name, c.last_name, c.email
+    SELECT o.*, c.first_name, c.last_name, c.email, p.method_name, p.payment_status
     FROM `order` o
     JOIN customer c ON o.customer_id = c.customer_id
+    LEFT JOIN payment p ON o.order_id = p.order_id
     ORDER BY o.order_date DESC
 ";
 $result = mysqli_query($conn, $sql);
@@ -70,6 +72,7 @@ $result = mysqli_query($conn, $sql);
         <th>Email</th>
         <th>Date</th>
         <th>Status</th>
+        <th>Payment</th>
         <th>Total (USD)</th>
         <th>Details</th>
     </tr>
@@ -91,6 +94,12 @@ $result = mysqli_query($conn, $sql);
                 elseif ($status === 'CANCELLED') $class = 'badge-cancelled';
                 ?>
                 <span class="badge <?php echo $class; ?>"><?php echo htmlspecialchars($status); ?></span>
+            </td>
+            <td>
+                <?php echo htmlspecialchars($row['method_name'] ?? 'N/A'); ?>
+                <?php if (!empty($row['payment_status'])): ?>
+                    <br><span style="font-size:.75rem;color:#9ca3af;"><?php echo htmlspecialchars($row['payment_status']); ?></span>
+                <?php endif; ?>
             </td>
             <td><?php echo number_format($row['total_amount'], 2); ?></td>
             <td><a href="order_view_admin.php?id=<?php echo (int)$row['order_id']; ?>">View</a></td>

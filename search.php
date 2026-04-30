@@ -6,12 +6,16 @@ require_once 'functions.php';
 
 // Read search query from URL parameter and trim whitespace
 $query = trim($_GET['q'] ?? '');
+$sort = (string)($_GET['sort'] ?? 'name_asc');
+if (!in_array($sort, ['name_asc', 'price_asc', 'price_desc', 'newest'], true)) {
+    $sort = 'name_asc';
+}
 // Will hold mysqli result set when a search is performed
 $results = null;
 
 // If the user entered a non-empty search term, perform the product search
 if (!empty($query)) {
-    $results = searchProducts($query);
+    $results = searchProducts($query, $sort);
 }
 ?>
 <!DOCTYPE html>
@@ -37,6 +41,15 @@ if (!empty($query)) {
         /* Text showing query and result count */
         .search-info{color:#666;font-size:1.1rem}
         .search-query{font-weight:700;color:#667eea}
+        .search-controls{
+            margin-top:1rem;display:flex;gap:.75rem;align-items:center;flex-wrap:wrap
+        }
+        .search-controls select{
+            padding:.65rem .8rem;border:2px solid #e1e4e8;border-radius:10px;background:#fff;font:inherit
+        }
+        .search-controls button{
+            border:none;border-radius:10px;padding:.7rem 1rem;background:#667eea;color:#fff;font-weight:700;cursor:pointer
+        }
         /* Responsive grid of product cards */
         .products-grid{
             display:grid;
@@ -137,6 +150,17 @@ if (!empty($query)) {
                     <span>(<?php echo mysqli_num_rows($results); ?> products found)</span>
                 <?php endif; ?>
             </div>
+            <form method="GET" class="search-controls">
+                <input type="hidden" name="q" value="<?php echo htmlspecialchars($query); ?>">
+                <label for="sort">Sort by</label>
+                <select name="sort" id="sort">
+                    <option value="name_asc" <?php echo $sort === 'name_asc' ? 'selected' : ''; ?>>Name</option>
+                    <option value="price_asc" <?php echo $sort === 'price_asc' ? 'selected' : ''; ?>>Price: Low to High</option>
+                    <option value="price_desc" <?php echo $sort === 'price_desc' ? 'selected' : ''; ?>>Price: High to Low</option>
+                    <option value="newest" <?php echo $sort === 'newest' ? 'selected' : ''; ?>>Newest</option>
+                </select>
+                <button type="submit">Apply</button>
+            </form>
         </div>
 
         <?php if ($results && mysqli_num_rows($results) > 0): ?>

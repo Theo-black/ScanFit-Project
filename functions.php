@@ -2,9 +2,25 @@
 // functions.php
 // Central shared functions for ScanFit
 
+function configureSessionSavePath(): void
+{
+    $currentPath = session_save_path();
+    if ($currentPath !== '' && is_dir($currentPath) && is_writable($currentPath)) {
+        return;
+    }
+
+    $fallbackPath = __DIR__ . DIRECTORY_SEPARATOR . 'storage' . DIRECTORY_SEPARATOR . 'sessions';
+    if (!is_dir($fallbackPath)) {
+        @mkdir($fallbackPath, 0775, true);
+    }
+    if (is_dir($fallbackPath) && is_writable($fallbackPath)) {
+        session_save_path($fallbackPath);
+    }
+}
 
 // Start session first
 if (session_status() === PHP_SESSION_NONE) {
+    configureSessionSavePath();
     session_start();
 }
 
@@ -119,7 +135,275 @@ function ensureCustomerSecurityColumns(): void
     @mysqli_query($conn, $contactMessageTableSql);
 }
 
+function ensurePaymentProviderColumns(): void
+{
+    static $checked = false;
+    if ($checked) {
+        return;
+    }
+    $checked = true;
+
+    global $conn;
+
+    $requiredColumns = [
+        'provider' => "ALTER TABLE payment ADD COLUMN provider VARCHAR(50) DEFAULT NULL",
+        'provider_payment_id' => "ALTER TABLE payment ADD COLUMN provider_payment_id VARCHAR(191) DEFAULT NULL",
+        'stripe_checkout_session_id' => "ALTER TABLE payment ADD COLUMN stripe_checkout_session_id VARCHAR(191) DEFAULT NULL",
+        'metadata_json' => "ALTER TABLE payment ADD COLUMN metadata_json TEXT DEFAULT NULL",
+        'updated_at' => "ALTER TABLE payment ADD COLUMN updated_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP",
+    ];
+
+    foreach ($requiredColumns as $columnName => $alterSql) {
+        $escapedColumn = mysqli_real_escape_string($conn, $columnName);
+        $checkSql = "
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_schema = DATABASE()
+              AND table_name = 'payment'
+              AND column_name = '{$escapedColumn}'
+            LIMIT 1
+        ";
+        $res = mysqli_query($conn, $checkSql);
+        if ($res && mysqli_num_rows($res) === 0) {
+            @mysqli_query($conn, $alterSql);
+        }
+    }
+
+    $indexCheckSql = "
+        SELECT 1
+        FROM information_schema.statistics
+        WHERE table_schema = DATABASE()
+          AND table_name = 'payment'
+          AND index_name = 'uniq_payment_stripe_checkout_session'
+        LIMIT 1
+    ";
+    $indexRes = mysqli_query($conn, $indexCheckSql);
+    if ($indexRes && mysqli_num_rows($indexRes) === 0) {
+        @mysqli_query($conn, "ALTER TABLE payment ADD UNIQUE KEY uniq_payment_stripe_checkout_session (stripe_checkout_session_id)");
+    }
+}
+
+function ensureOrderFulfillmentColumns(): void
+{
+    static $checked = false;
+    if ($checked) {
+        return;
+    }
+    $checked = true;
+
+    global $conn;
+
+    $requiredColumns = [
+        'shipping_address_id' => "ALTER TABLE `order` ADD COLUMN shipping_address_id INT DEFAULT NULL",
+        'shipping_carrier' => "ALTER TABLE `order` ADD COLUMN shipping_carrier VARCHAR(100) DEFAULT NULL",
+        'tracking_number' => "ALTER TABLE `order` ADD COLUMN tracking_number VARCHAR(191) DEFAULT NULL",
+        'shipped_at' => "ALTER TABLE `order` ADD COLUMN shipped_at DATETIME DEFAULT NULL",
+        'delivered_at' => "ALTER TABLE `order` ADD COLUMN delivered_at DATETIME DEFAULT NULL",
+    ];
+
+    foreach ($requiredColumns as $columnName => $alterSql) {
+        $escapedColumn = mysqli_real_escape_string($conn, $columnName);
+        $checkSql = "
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_schema = DATABASE()
+              AND table_name = 'order'
+              AND column_name = '{$escapedColumn}'
+            LIMIT 1
+        ";
+        $res = mysqli_query($conn, $checkSql);
+        if ($res && mysqli_num_rows($res) === 0) {
+            @mysqli_query($conn, $alterSql);
+        }
+    }
+}
+
+function ensureReviewColumns(): void
+{
+    static $checked = false;
+    if ($checked) {
+        return;
+    }
+    $checked = true;
+
+    global $conn;
+
+    $indexCheckSql = "
+        SELECT 1
+        FROM information_schema.statistics
+        WHERE table_schema = DATABASE()
+          AND table_name = 'review'
+          AND index_name = 'uniq_review_customer_product'
+        LIMIT 1
+    ";
+    $indexRes = mysqli_query($conn, $indexCheckSql);
+    if ($indexRes && mysqli_num_rows($indexRes) === 0) {
+        @mysqli_query($conn, "ALTER TABLE review ADD UNIQUE KEY uniq_review_customer_product (customer_id, product_id)");
+    }
+}
+
+function ensureWishlistTable(): void
+{
+    static $checked = false;
+    if ($checked) {
+        return;
+    }
+    $checked = true;
+
+    global $conn;
+
+    $sql = "
+        CREATE TABLE IF NOT EXISTS wishlist (
+            wishlist_id INT NOT NULL AUTO_INCREMENT,
+            customer_id INT NOT NULL,
+            product_id INT NOT NULL,
+            created_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (wishlist_id),
+            UNIQUE KEY uniq_wishlist_customer_product (customer_id, product_id),
+            KEY product_id (product_id),
+            CONSTRAINT wishlist_customer_fk FOREIGN KEY (customer_id) REFERENCES customer (customer_id) ON DELETE CASCADE,
+            CONSTRAINT wishlist_product_fk FOREIGN KEY (product_id) REFERENCES product (product_id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+    ";
+    @mysqli_query($conn, $sql);
+}
+
+function ensureCouponTables(): void
+{
+    static $checked = false;
+    if ($checked) {
+        return;
+    }
+    $checked = true;
+
+    global $conn;
+
+    $couponSql = "
+        CREATE TABLE IF NOT EXISTS coupon (
+            coupon_id INT NOT NULL AUTO_INCREMENT,
+            code VARCHAR(50) NOT NULL,
+            description VARCHAR(255) DEFAULT NULL,
+            discount_type ENUM('PERCENT','FIXED') NOT NULL DEFAULT 'PERCENT',
+            discount_value DECIMAL(10,2) NOT NULL,
+            active TINYINT(1) NOT NULL DEFAULT 1,
+            starts_at DATETIME DEFAULT NULL,
+            ends_at DATETIME DEFAULT NULL,
+            created_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (coupon_id),
+            UNIQUE KEY uniq_coupon_code (code)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+    ";
+    @mysqli_query($conn, $couponSql);
+
+    $orderCouponSql = "
+        CREATE TABLE IF NOT EXISTS order_coupon (
+            order_coupon_id INT NOT NULL AUTO_INCREMENT,
+            order_id INT NOT NULL,
+            coupon_id INT DEFAULT NULL,
+            code VARCHAR(50) NOT NULL,
+            discount_amount DECIMAL(10,2) NOT NULL DEFAULT 0.00,
+            created_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (order_coupon_id),
+            KEY order_id (order_id),
+            KEY coupon_id (coupon_id),
+            CONSTRAINT order_coupon_order_fk FOREIGN KEY (order_id) REFERENCES `order` (order_id) ON DELETE CASCADE,
+            CONSTRAINT order_coupon_coupon_fk FOREIGN KEY (coupon_id) REFERENCES coupon (coupon_id) ON DELETE SET NULL
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+    ";
+    @mysqli_query($conn, $orderCouponSql);
+}
+
+function ensureReturnRequestTable(): void
+{
+    static $checked = false;
+    if ($checked) {
+        return;
+    }
+    $checked = true;
+
+    global $conn;
+
+    $sql = "
+        CREATE TABLE IF NOT EXISTS return_request (
+            return_id INT NOT NULL AUTO_INCREMENT,
+            order_id INT NOT NULL,
+            customer_id INT NOT NULL,
+            order_item_id INT DEFAULT NULL,
+            reason VARCHAR(1000) NOT NULL,
+            status ENUM('REQUESTED','APPROVED','REJECTED','RECEIVED','REFUNDED') NOT NULL DEFAULT 'REQUESTED',
+            admin_notes VARCHAR(1000) DEFAULT NULL,
+            created_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            PRIMARY KEY (return_id),
+            KEY order_id (order_id),
+            KEY customer_id (customer_id),
+            KEY order_item_id (order_item_id),
+            CONSTRAINT return_request_order_fk FOREIGN KEY (order_id) REFERENCES `order` (order_id) ON DELETE CASCADE,
+            CONSTRAINT return_request_customer_fk FOREIGN KEY (customer_id) REFERENCES customer (customer_id) ON DELETE CASCADE,
+            CONSTRAINT return_request_order_item_fk FOREIGN KEY (order_item_id) REFERENCES orderitem (order_item_id) ON DELETE SET NULL
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+    ";
+    @mysqli_query($conn, $sql);
+}
+
+function ensureSupportedCountries(): void
+{
+    static $checked = false;
+    if ($checked) {
+        return;
+    }
+    $checked = true;
+
+    global $conn;
+
+    $countries = [
+        ['United States', 'US'],
+        ['Canada', 'CA'],
+        ['United Kingdom', 'GB'],
+        ['Jamaica', 'JM'],
+        ['Barbados', 'BB'],
+        ['Trinidad and Tobago', 'TT'],
+        ['Bahamas', 'BS'],
+        ['Cayman Islands', 'KY'],
+        ['Antigua and Barbuda', 'AG'],
+        ['Saint Lucia', 'LC'],
+        ['Saint Vincent and the Grenadines', 'VC'],
+        ['Grenada', 'GD'],
+        ['Dominican Republic', 'DO'],
+        ['Haiti', 'HT'],
+        ['Mexico', 'MX'],
+        ['Australia', 'AU'],
+        ['Germany', 'DE'],
+        ['France', 'FR'],
+    ];
+
+    $selectStmt = mysqli_prepare($conn, "SELECT country_id FROM country WHERE iso_code = ? OR name = ? LIMIT 1");
+    $insertStmt = mysqli_prepare($conn, "INSERT INTO country (name, iso_code, created_at) VALUES (?, ?, NOW())");
+    if (!$selectStmt || !$insertStmt) {
+        return;
+    }
+
+    foreach ($countries as [$name, $isoCode]) {
+        mysqli_stmt_bind_param($selectStmt, 'ss', $isoCode, $name);
+        mysqli_stmt_execute($selectStmt);
+        $res = mysqli_stmt_get_result($selectStmt);
+        if (mysqli_fetch_assoc($res)) {
+            continue;
+        }
+
+        mysqli_stmt_bind_param($insertStmt, 'ss', $name, $isoCode);
+        @mysqli_stmt_execute($insertStmt);
+    }
+}
+
 ensureCustomerSecurityColumns();
+ensurePaymentProviderColumns();
+ensureOrderFulfillmentColumns();
+ensureReviewColumns();
+ensureWishlistTable();
+ensureCouponTables();
+ensureReturnRequestTable();
+ensureSupportedCountries();
 
 
 // ------------- BASIC AUTH HELPERS -------------
@@ -447,6 +731,273 @@ function getSmtpConfig(): array
     ];
 }
 
+function getStripeConfig(): array
+{
+    return [
+        'secret_key' => trim((string)(getenv('SCANFIT_STRIPE_SECRET_KEY') ?: '')),
+        'webhook_secret' => trim((string)(getenv('SCANFIT_STRIPE_WEBHOOK_SECRET') ?: '')),
+        'currency' => strtolower(trim((string)(getenv('SCANFIT_STRIPE_CURRENCY') ?: 'usd'))),
+    ];
+}
+
+function getStorePricingConfig(): array
+{
+    $shipping = (float)(getenv('SCANFIT_FLAT_SHIPPING_USD') ?: 5.00);
+    $taxRate = (float)(getenv('SCANFIT_TAX_RATE') ?: 0.10);
+
+    return [
+        'flat_shipping' => max(0, $shipping),
+        'tax_rate' => max(0, $taxRate),
+    ];
+}
+
+function getLowStockThreshold(): int
+{
+    return max(0, (int)(getenv('SCANFIT_LOW_STOCK_THRESHOLD') ?: 5));
+}
+
+function normalizeCouponCode(string $code): string
+{
+    return strtoupper(trim($code));
+}
+
+function getCouponByCode(string $code): ?array
+{
+    global $conn;
+
+    $code = normalizeCouponCode($code);
+    if ($code === '') {
+        return null;
+    }
+
+    $sql = "
+        SELECT *
+        FROM coupon
+        WHERE code = ?
+          AND active = 1
+          AND (starts_at IS NULL OR starts_at <= NOW())
+          AND (ends_at IS NULL OR ends_at >= NOW())
+        LIMIT 1
+    ";
+    $stmt = mysqli_prepare($conn, $sql);
+    if (!$stmt) {
+        return null;
+    }
+    mysqli_stmt_bind_param($stmt, 's', $code);
+    mysqli_stmt_execute($stmt);
+    $res = mysqli_stmt_get_result($stmt);
+    $coupon = mysqli_fetch_assoc($res);
+
+    return $coupon ?: null;
+}
+
+function calculateCouponDiscount(?array $coupon, float $subtotal): float
+{
+    if (!$coupon || $subtotal <= 0) {
+        return 0.0;
+    }
+
+    $value = max(0, (float)($coupon['discount_value'] ?? 0));
+    if (($coupon['discount_type'] ?? '') === 'FIXED') {
+        return min($subtotal, $value);
+    }
+
+    return min($subtotal, $subtotal * min(100, $value) / 100);
+}
+
+function getActiveCartCoupon(float $subtotal): array
+{
+    $code = normalizeCouponCode((string)($_SESSION['cart_coupon_code'] ?? ''));
+    $coupon = $code !== '' ? getCouponByCode($code) : null;
+    if (!$coupon) {
+        unset($_SESSION['cart_coupon_code']);
+        return ['coupon' => null, 'discount' => 0.0, 'code' => ''];
+    }
+
+    $discount = calculateCouponDiscount($coupon, $subtotal);
+    return ['coupon' => $coupon, 'discount' => $discount, 'code' => (string)$coupon['code']];
+}
+
+function getReturnRequestsForOrder(int $orderId, ?int $customerId = null): array
+{
+    global $conn;
+
+    $sql = "
+        SELECT rr.*, p.name AS product_name, oi.quantity, oi.line_total
+        FROM return_request rr
+        LEFT JOIN orderitem oi ON rr.order_item_id = oi.order_item_id
+        LEFT JOIN productvariant pv ON oi.variant_id = pv.variant_id
+        LEFT JOIN product p ON pv.product_id = p.product_id
+        WHERE rr.order_id = ?
+    ";
+    $types = 'i';
+    $params = [$orderId];
+    if ($customerId !== null) {
+        $sql .= " AND rr.customer_id = ?";
+        $types .= 'i';
+        $params[] = $customerId;
+    }
+    $sql .= " ORDER BY rr.created_at DESC";
+
+    $stmt = mysqli_prepare($conn, $sql);
+    if (!$stmt) {
+        return [];
+    }
+    $bind = [$types];
+    foreach ($params as $key => $value) {
+        $bind[] = &$params[$key];
+    }
+    mysqli_stmt_bind_param($stmt, ...$bind);
+    mysqli_stmt_execute($stmt);
+    $res = mysqli_stmt_get_result($stmt);
+
+    $returns = [];
+    while ($row = mysqli_fetch_assoc($res)) {
+        $returns[] = $row;
+    }
+    return $returns;
+}
+
+function createReturnRequest(int $orderId, int $customerId, ?int $orderItemId, string $reason): bool
+{
+    global $conn;
+
+    $reason = trim($reason);
+    if ($orderId <= 0 || $customerId <= 0 || $reason === '' || strlen($reason) > 1000) {
+        return false;
+    }
+
+    $orderSql = "SELECT status FROM `order` WHERE order_id = ? AND customer_id = ? LIMIT 1";
+    $orderStmt = mysqli_prepare($conn, $orderSql);
+    if (!$orderStmt) {
+        return false;
+    }
+    mysqli_stmt_bind_param($orderStmt, 'ii', $orderId, $customerId);
+    mysqli_stmt_execute($orderStmt);
+    $order = mysqli_fetch_assoc(mysqli_stmt_get_result($orderStmt));
+    if (!$order || $order['status'] !== 'DELIVERED') {
+        return false;
+    }
+
+    if ($orderItemId !== null && $orderItemId > 0) {
+        $itemSql = "SELECT order_item_id FROM orderitem WHERE order_item_id = ? AND order_id = ? LIMIT 1";
+        $itemStmt = mysqli_prepare($conn, $itemSql);
+        if (!$itemStmt) {
+            return false;
+        }
+        mysqli_stmt_bind_param($itemStmt, 'ii', $orderItemId, $orderId);
+        mysqli_stmt_execute($itemStmt);
+        if (!mysqli_fetch_assoc(mysqli_stmt_get_result($itemStmt))) {
+            return false;
+        }
+
+        $dupSql = "
+            SELECT return_id
+            FROM return_request
+            WHERE order_id = ? AND customer_id = ? AND order_item_id = ? AND status IN ('REQUESTED','APPROVED','RECEIVED')
+            LIMIT 1
+        ";
+        $dupStmt = mysqli_prepare($conn, $dupSql);
+        if (!$dupStmt) {
+            return false;
+        }
+        mysqli_stmt_bind_param($dupStmt, 'iii', $orderId, $customerId, $orderItemId);
+    } else {
+        $orderItemId = null;
+        $dupSql = "
+            SELECT return_id
+            FROM return_request
+            WHERE order_id = ? AND customer_id = ? AND order_item_id IS NULL AND status IN ('REQUESTED','APPROVED','RECEIVED')
+            LIMIT 1
+        ";
+        $dupStmt = mysqli_prepare($conn, $dupSql);
+        if (!$dupStmt) {
+            return false;
+        }
+        mysqli_stmt_bind_param($dupStmt, 'ii', $orderId, $customerId);
+    }
+    mysqli_stmt_execute($dupStmt);
+    if (mysqli_fetch_assoc(mysqli_stmt_get_result($dupStmt))) {
+        return false;
+    }
+
+    $insertSql = "
+        INSERT INTO return_request (order_id, customer_id, order_item_id, reason, status, created_at, updated_at)
+        VALUES (?, ?, ?, ?, 'REQUESTED', NOW(), NOW())
+    ";
+    $insertStmt = mysqli_prepare($conn, $insertSql);
+    if (!$insertStmt) {
+        return false;
+    }
+    mysqli_stmt_bind_param($insertStmt, 'iiis', $orderId, $customerId, $orderItemId, $reason);
+    return mysqli_stmt_execute($insertStmt);
+}
+
+function getAdminReturnRequests(?string $status = null): array
+{
+    global $conn;
+
+    $sql = "
+        SELECT rr.*, o.total_amount, o.order_date, c.first_name, c.last_name, c.email, p.name AS product_name
+        FROM return_request rr
+        INNER JOIN `order` o ON rr.order_id = o.order_id
+        INNER JOIN customer c ON rr.customer_id = c.customer_id
+        LEFT JOIN orderitem oi ON rr.order_item_id = oi.order_item_id
+        LEFT JOIN productvariant pv ON oi.variant_id = pv.variant_id
+        LEFT JOIN product p ON pv.product_id = p.product_id
+    ";
+    $types = '';
+    $params = [];
+    if ($status && in_array($status, ['REQUESTED', 'APPROVED', 'REJECTED', 'RECEIVED', 'REFUNDED'], true)) {
+        $sql .= " WHERE rr.status = ?";
+        $types = 's';
+        $params[] = $status;
+    }
+    $sql .= " ORDER BY FIELD(rr.status, 'REQUESTED','APPROVED','RECEIVED','REFUNDED','REJECTED'), rr.created_at DESC";
+
+    $stmt = mysqli_prepare($conn, $sql);
+    if (!$stmt) {
+        return [];
+    }
+    if ($types !== '') {
+        mysqli_stmt_bind_param($stmt, $types, ...$params);
+    }
+    mysqli_stmt_execute($stmt);
+    $res = mysqli_stmt_get_result($stmt);
+
+    $returns = [];
+    while ($row = mysqli_fetch_assoc($res)) {
+        $returns[] = $row;
+    }
+    return $returns;
+}
+
+function updateReturnRequestStatus(int $returnId, string $status, string $adminNotes = ''): bool
+{
+    global $conn;
+
+    if ($returnId <= 0 || !in_array($status, ['REQUESTED', 'APPROVED', 'REJECTED', 'RECEIVED', 'REFUNDED'], true)) {
+        return false;
+    }
+    $adminNotes = trim($adminNotes);
+    if (strlen($adminNotes) > 1000) {
+        return false;
+    }
+
+    $stmt = mysqli_prepare($conn, "UPDATE return_request SET status = ?, admin_notes = ?, updated_at = NOW() WHERE return_id = ?");
+    if (!$stmt) {
+        return false;
+    }
+    mysqli_stmt_bind_param($stmt, 'ssi', $status, $adminNotes, $returnId);
+    return mysqli_stmt_execute($stmt);
+}
+
+function isStripeConfigured(): bool
+{
+    $config = getStripeConfig();
+    return $config['secret_key'] !== '';
+}
+
 function isSmtpConfigured(): bool
 {
     $cfg = getSmtpConfig();
@@ -601,6 +1152,56 @@ function sendAppEmail(string $to, string $subject, string $htmlBody, ?string $te
     $message .= "--{$boundary}--\r\n";
 
     return @mail($to, $subject, $message, implode("\r\n", $headers));
+}
+
+function getAdminNotificationEmail(): string
+{
+    return trim((string)(getenv('SCANFIT_ADMIN_NOTIFY_EMAIL') ?: ''));
+}
+
+function saveProductImageUpload(array $file, string $sku, ?string &$error = null): bool
+{
+    $error = null;
+
+    if (($file['error'] ?? UPLOAD_ERR_NO_FILE) === UPLOAD_ERR_NO_FILE) {
+        return true;
+    }
+    if (($file['error'] ?? UPLOAD_ERR_OK) !== UPLOAD_ERR_OK) {
+        $error = 'Product image upload failed.';
+        return false;
+    }
+
+    $tmpName = (string)($file['tmp_name'] ?? '');
+    if ($tmpName === '' || !is_uploaded_file($tmpName)) {
+        $error = 'Invalid product image upload.';
+        return false;
+    }
+
+    $info = @getimagesize($tmpName);
+    if (!$info || ($info['mime'] ?? '') !== 'image/jpeg') {
+        $error = 'Product image must be a JPEG file.';
+        return false;
+    }
+
+    $safeSku = preg_replace('/[^A-Za-z0-9._-]/', '', $sku);
+    if ($safeSku === '') {
+        $error = 'Product SKU is not valid for an image filename.';
+        return false;
+    }
+
+    $targetDir = __DIR__ . DIRECTORY_SEPARATOR . 'images';
+    if (!is_dir($targetDir) && !mkdir($targetDir, 0775, true)) {
+        $error = 'Could not create product image directory.';
+        return false;
+    }
+
+    $target = $targetDir . DIRECTORY_SEPARATOR . $safeSku . '.jpg';
+    if (!move_uploaded_file($tmpName, $target)) {
+        $error = 'Could not save product image.';
+        return false;
+    }
+
+    return true;
 }
 
 function createEmailVerificationToken(): string
@@ -2562,6 +3163,141 @@ function getProductsByGender(string $genderDisplay)
     return mysqli_stmt_get_result($stmt);
 }
 
+function getFilteredProductsByGender(string $genderDisplay, array $filters = [])
+{
+    global $conn;
+
+    $genderMap = [
+        'Men' => 'Male',
+        'Women' => 'Female',
+        'Unisex' => 'Unisex',
+    ];
+    $genderName = $genderMap[$genderDisplay] ?? $genderDisplay;
+
+    $where = [
+        'g.name = ?',
+        "p.status = 'ACTIVE'",
+    ];
+    $params = [$genderName];
+    $types = 's';
+
+    $sizeId = (int)($filters['size_id'] ?? 0);
+    if ($sizeId > 0) {
+        $where[] = 'EXISTS (SELECT 1 FROM productvariant fpv WHERE fpv.product_id = p.product_id AND fpv.size_id = ? AND fpv.stock_quantity > 0)';
+        $params[] = $sizeId;
+        $types .= 'i';
+    }
+
+    $colourId = (int)($filters['colour_id'] ?? 0);
+    if ($colourId > 0) {
+        $where[] = 'EXISTS (SELECT 1 FROM productvariant fpv WHERE fpv.product_id = p.product_id AND fpv.colour_id = ? AND fpv.stock_quantity > 0)';
+        $params[] = $colourId;
+        $types .= 'i';
+    }
+
+    $minPrice = isset($filters['min_price']) && $filters['min_price'] !== '' ? max(0, (float)$filters['min_price']) : null;
+    if ($minPrice !== null) {
+        $where[] = 'p.base_price >= ?';
+        $params[] = $minPrice;
+        $types .= 'd';
+    }
+
+    $maxPrice = isset($filters['max_price']) && $filters['max_price'] !== '' ? max(0, (float)$filters['max_price']) : null;
+    if ($maxPrice !== null) {
+        $where[] = 'p.base_price <= ?';
+        $params[] = $maxPrice;
+        $types .= 'd';
+    }
+
+    $sort = (string)($filters['sort'] ?? 'newest');
+    $orderBy = 'p.created_at DESC';
+    if ($sort === 'price_asc') {
+        $orderBy = 'p.base_price ASC, p.name ASC';
+    } elseif ($sort === 'price_desc') {
+        $orderBy = 'p.base_price DESC, p.name ASC';
+    } elseif ($sort === 'name_asc') {
+        $orderBy = 'p.name ASC';
+    }
+
+    $sql = "
+        SELECT DISTINCT p.*
+        FROM product p
+        INNER JOIN productgender pg ON p.product_id = pg.product_id
+        INNER JOIN gender g ON pg.gender_id = g.gender_id
+        WHERE " . implode(' AND ', $where) . "
+        ORDER BY {$orderBy}
+    ";
+
+    $stmt = mysqli_prepare($conn, $sql);
+    if (!$stmt) {
+        error_log('getFilteredProductsByGender prepare error: ' . mysqli_error($conn));
+        return mysqli_query($conn, "SELECT * FROM product WHERE 1=0");
+    }
+    $bind = [$types];
+    foreach ($params as $key => $value) {
+        $bind[] = &$params[$key];
+    }
+    mysqli_stmt_bind_param($stmt, ...$bind);
+    mysqli_stmt_execute($stmt);
+    return mysqli_stmt_get_result($stmt);
+}
+
+function getCollectionFilterOptions(string $genderDisplay): array
+{
+    global $conn;
+
+    $genderMap = [
+        'Men' => 'Male',
+        'Women' => 'Female',
+        'Unisex' => 'Unisex',
+    ];
+    $genderName = $genderMap[$genderDisplay] ?? $genderDisplay;
+
+    $sizes = [];
+    $colours = [];
+    $sizeSql = "
+        SELECT DISTINCT s.size_id, s.name, s.sort_order
+        FROM size s
+        INNER JOIN productvariant pv ON s.size_id = pv.size_id
+        INNER JOIN product p ON pv.product_id = p.product_id
+        INNER JOIN productgender pg ON p.product_id = pg.product_id
+        INNER JOIN gender g ON pg.gender_id = g.gender_id
+        WHERE g.name = ? AND p.status = 'ACTIVE' AND pv.stock_quantity > 0
+        ORDER BY s.sort_order, s.name
+    ";
+    $sizeStmt = mysqli_prepare($conn, $sizeSql);
+    if ($sizeStmt) {
+        mysqli_stmt_bind_param($sizeStmt, 's', $genderName);
+        mysqli_stmt_execute($sizeStmt);
+        $sizeRes = mysqli_stmt_get_result($sizeStmt);
+        while ($row = mysqli_fetch_assoc($sizeRes)) {
+            $sizes[] = $row;
+        }
+    }
+
+    $colourSql = "
+        SELECT DISTINCT c.colour_id, c.name, c.hex_code
+        FROM colour c
+        INNER JOIN productvariant pv ON c.colour_id = pv.colour_id
+        INNER JOIN product p ON pv.product_id = p.product_id
+        INNER JOIN productgender pg ON p.product_id = pg.product_id
+        INNER JOIN gender g ON pg.gender_id = g.gender_id
+        WHERE g.name = ? AND p.status = 'ACTIVE' AND pv.stock_quantity > 0
+        ORDER BY c.name
+    ";
+    $colourStmt = mysqli_prepare($conn, $colourSql);
+    if ($colourStmt) {
+        mysqli_stmt_bind_param($colourStmt, 's', $genderName);
+        mysqli_stmt_execute($colourStmt);
+        $colourRes = mysqli_stmt_get_result($colourStmt);
+        while ($row = mysqli_fetch_assoc($colourRes)) {
+            $colours[] = $row;
+        }
+    }
+
+    return ['sizes' => $sizes, 'colours' => $colours];
+}
+
 
 /**
  * Fetch all variants for a given product.
@@ -2816,6 +3552,545 @@ function getCartTotal(int $customerId): float
     return isset($row['total']) ? (float)$row['total'] : 0.0;
 }
 
+function stripeApiRequest(string $method, string $path, array $params = []): array
+{
+    $config = getStripeConfig();
+    if ($config['secret_key'] === '') {
+        throw new Exception('Stripe is not configured.');
+    }
+    if (!function_exists('curl_init')) {
+        throw new Exception('The PHP cURL extension is required for Stripe payments.');
+    }
+
+    $url = 'https://api.stripe.com' . $path;
+    $ch = curl_init();
+    if ($ch === false) {
+        throw new Exception('Unable to initialize Stripe request.');
+    }
+
+    $method = strtoupper($method);
+    if ($method === 'GET' && !empty($params)) {
+        $url .= '?' . http_build_query($params);
+    }
+
+    curl_setopt_array($ch, [
+        CURLOPT_URL => $url,
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_USERPWD => $config['secret_key'] . ':',
+        CURLOPT_HTTPHEADER => ['Content-Type: application/x-www-form-urlencoded'],
+        CURLOPT_TIMEOUT => 30,
+    ]);
+    $caBundle = trim((string)(getenv('SCANFIT_CA_BUNDLE') ?: ''));
+    if ($caBundle !== '') {
+        curl_setopt($ch, CURLOPT_CAINFO, $caBundle);
+    }
+
+    if ($method === 'POST') {
+        curl_setopt($ch, CURLOPT_POST, true);
+        curl_setopt($ch, CURLOPT_POSTFIELDS, http_build_query($params));
+    }
+
+    $response = curl_exec($ch);
+    $status = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $curlError = curl_error($ch);
+    curl_close($ch);
+
+    if ($response === false) {
+        throw new Exception('Stripe request failed: ' . $curlError);
+    }
+
+    $data = json_decode($response, true);
+    if (!is_array($data)) {
+        throw new Exception('Stripe returned an invalid response.');
+    }
+
+    if ($status < 200 || $status >= 300) {
+        $message = $data['error']['message'] ?? 'Stripe request was rejected.';
+        throw new Exception($message);
+    }
+
+    return $data;
+}
+
+function createStripeCheckoutSession(array $lineItems, int $orderId, int $customerId, ?string $customerEmail): array
+{
+    $config = getStripeConfig();
+    $successUrl = getAppBaseUrl() . '/stripe_checkout_success.php?session_id={CHECKOUT_SESSION_ID}';
+    $cancelUrl = getAppBaseUrl() . '/checkout.php?payment_cancelled=1&order_id=' . $orderId;
+
+    $params = [
+        'mode' => 'payment',
+        'success_url' => $successUrl,
+        'cancel_url' => $cancelUrl,
+        'payment_method_types' => ['card'],
+        'line_items' => $lineItems,
+        'client_reference_id' => (string)$orderId,
+        'metadata' => [
+            'order_id' => (string)$orderId,
+            'customer_id' => (string)$customerId,
+        ],
+    ];
+
+    if ($customerEmail !== null && $customerEmail !== '') {
+        $params['customer_email'] = $customerEmail;
+    }
+
+    return stripeApiRequest('POST', '/v1/checkout/sessions', $params);
+}
+
+function retrieveStripeCheckoutSession(string $sessionId): array
+{
+    return stripeApiRequest('GET', '/v1/checkout/sessions/' . rawurlencode($sessionId));
+}
+
+function createStripeRefund(string $paymentIntentId, ?float $amount = null): array
+{
+    $params = ['payment_intent' => $paymentIntentId];
+    if ($amount !== null && $amount > 0) {
+        $params['amount'] = (int)round($amount * 100);
+    }
+
+    return stripeApiRequest('POST', '/v1/refunds', $params);
+}
+
+function verifyStripeWebhookSignature(string $payload, string $signatureHeader): bool
+{
+    $config = getStripeConfig();
+    if ($config['webhook_secret'] === '' || $signatureHeader === '') {
+        return false;
+    }
+
+    $timestamp = null;
+    $signatures = [];
+    foreach (explode(',', $signatureHeader) as $part) {
+        [$key, $value] = array_pad(explode('=', trim($part), 2), 2, '');
+        if ($key === 't') {
+            $timestamp = $value;
+        } elseif ($key === 'v1') {
+            $signatures[] = $value;
+        }
+    }
+
+    if ($timestamp === null || empty($signatures) || !ctype_digit($timestamp)) {
+        return false;
+    }
+
+    if (abs(time() - (int)$timestamp) > 300) {
+        return false;
+    }
+
+    $expected = hash_hmac('sha256', $timestamp . '.' . $payload, $config['webhook_secret']);
+    foreach ($signatures as $signature) {
+        if (hash_equals($expected, $signature)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+function fulfillStripeCheckoutSession(string $sessionId): ?int
+{
+    global $conn;
+
+    $session = retrieveStripeCheckoutSession($sessionId);
+    if (($session['payment_status'] ?? '') !== 'paid') {
+        return null;
+    }
+
+    mysqli_begin_transaction($conn);
+    try {
+        $paymentSql = "
+            SELECT p.payment_id, p.order_id, p.payment_status, o.customer_id, o.status
+            FROM payment p
+            INNER JOIN `order` o ON p.order_id = o.order_id
+            WHERE p.stripe_checkout_session_id = ?
+            LIMIT 1
+            FOR UPDATE
+        ";
+        $paymentStmt = mysqli_prepare($conn, $paymentSql);
+        if (!$paymentStmt) {
+            throw new Exception('Failed to prepare payment lookup.');
+        }
+        mysqli_stmt_bind_param($paymentStmt, 's', $sessionId);
+        mysqli_stmt_execute($paymentStmt);
+        $paymentRes = mysqli_stmt_get_result($paymentStmt);
+        $payment = mysqli_fetch_assoc($paymentRes);
+        if (!$payment) {
+            throw new Exception('Payment record not found.');
+        }
+
+        $orderId = (int)$payment['order_id'];
+        if ($payment['payment_status'] === 'COMPLETED') {
+            mysqli_commit($conn);
+            return $orderId;
+        }
+        if ($payment['payment_status'] !== 'PENDING' || $payment['status'] !== 'PENDING') {
+            mysqli_commit($conn);
+            return null;
+        }
+
+        $paymentIntentId = (string)($session['payment_intent'] ?? '');
+        $metadataJson = json_encode($session, JSON_UNESCAPED_SLASHES);
+        $updatePaymentSql = "
+            UPDATE payment
+            SET payment_status = 'COMPLETED',
+                provider_payment_id = ?,
+                metadata_json = ?,
+                updated_at = NOW()
+            WHERE payment_id = ?
+        ";
+        $updatePaymentStmt = mysqli_prepare($conn, $updatePaymentSql);
+        if (!$updatePaymentStmt) {
+            throw new Exception('Failed to prepare payment update.');
+        }
+        mysqli_stmt_bind_param($updatePaymentStmt, 'ssi', $paymentIntentId, $metadataJson, $payment['payment_id']);
+        if (!mysqli_stmt_execute($updatePaymentStmt)) {
+            throw new Exception('Failed to update payment.');
+        }
+
+        $orderUpdateSql = "UPDATE `order` SET status = 'PROCESSING', updated_at = NOW() WHERE order_id = ?";
+        $orderUpdateStmt = mysqli_prepare($conn, $orderUpdateSql);
+        if (!$orderUpdateStmt) {
+            throw new Exception('Failed to prepare order update.');
+        }
+        mysqli_stmt_bind_param($orderUpdateStmt, 'i', $orderId);
+        if (!mysqli_stmt_execute($orderUpdateStmt)) {
+            throw new Exception('Failed to update order.');
+        }
+
+        $clearCartSql = "UPDATE cart SET status = 'COMPLETED' WHERE customer_id = ? AND status = 'ACTIVE'";
+        $clearCartStmt = mysqli_prepare($conn, $clearCartSql);
+        if (!$clearCartStmt) {
+            throw new Exception('Failed to prepare cart clear.');
+        }
+        mysqli_stmt_bind_param($clearCartStmt, 'i', $payment['customer_id']);
+        if (!mysqli_stmt_execute($clearCartStmt)) {
+            throw new Exception('Failed to clear cart.');
+        }
+
+        unset($_SESSION['cart_coupon_code']);
+
+        mysqli_commit($conn);
+        sendOrderCustomerEmail($orderId, 'placed');
+        sendAdminNewOrderEmail($orderId);
+        return $orderId;
+    } catch (Exception $e) {
+        mysqli_rollback($conn);
+        error_log('Stripe fulfillment failed: ' . $e->getMessage());
+        return null;
+    }
+}
+
+function restockOrderItems(int $orderId, string $auditNote): void
+{
+    global $conn;
+
+    $itemsSql = "SELECT variant_id, quantity FROM orderitem WHERE order_id = ?";
+    $itemsStmt = mysqli_prepare($conn, $itemsSql);
+    if (!$itemsStmt) {
+        throw new Exception('Failed to load order items.');
+    }
+    mysqli_stmt_bind_param($itemsStmt, 'i', $orderId);
+    mysqli_stmt_execute($itemsStmt);
+    $itemsRes = mysqli_stmt_get_result($itemsStmt);
+
+    while ($item = mysqli_fetch_assoc($itemsRes)) {
+        $variantId = (int)$item['variant_id'];
+        $qty = (int)$item['quantity'];
+
+        $restockSql = "UPDATE productvariant SET stock_quantity = stock_quantity + ? WHERE variant_id = ?";
+        $restockStmt = mysqli_prepare($conn, $restockSql);
+        if (!$restockStmt) {
+            throw new Exception('Failed to prepare restock.');
+        }
+        mysqli_stmt_bind_param($restockStmt, 'ii', $qty, $variantId);
+        if (!mysqli_stmt_execute($restockStmt) || mysqli_stmt_affected_rows($restockStmt) !== 1) {
+            throw new Exception('Failed to restock variant.');
+        }
+
+        $auditSql = "
+            INSERT INTO stockmovement (variant_id, movement_type, quantity, reference_id, notes)
+            VALUES (?, 'IN', ?, ?, ?)
+        ";
+        $auditStmt = mysqli_prepare($conn, $auditSql);
+        if (!$auditStmt) {
+            throw new Exception('Failed to prepare stock audit.');
+        }
+        mysqli_stmt_bind_param($auditStmt, 'iiis', $variantId, $qty, $orderId, $auditNote);
+        if (!mysqli_stmt_execute($auditStmt)) {
+            throw new Exception('Failed to save stock audit.');
+        }
+    }
+}
+
+function cancelPendingStripeCheckoutOrder(int $orderId, ?int $customerId = null): bool
+{
+    global $conn;
+
+    if ($orderId <= 0) {
+        return false;
+    }
+
+    mysqli_begin_transaction($conn);
+    try {
+        $sql = "
+            SELECT o.order_id, o.customer_id, o.status, p.payment_id, p.method_name, p.payment_status
+            FROM `order` o
+            INNER JOIN payment p ON o.order_id = p.order_id
+            WHERE o.order_id = ?
+        ";
+        if ($customerId !== null) {
+            $sql .= " AND o.customer_id = ?";
+        }
+        $sql .= " LIMIT 1 FOR UPDATE";
+
+        $stmt = mysqli_prepare($conn, $sql);
+        if (!$stmt) {
+            throw new Exception('Failed to prepare Stripe cancellation lookup.');
+        }
+        if ($customerId !== null) {
+            mysqli_stmt_bind_param($stmt, 'ii', $orderId, $customerId);
+        } else {
+            mysqli_stmt_bind_param($stmt, 'i', $orderId);
+        }
+        mysqli_stmt_execute($stmt);
+        $res = mysqli_stmt_get_result($stmt);
+        $row = mysqli_fetch_assoc($res);
+
+        if (
+            !$row ||
+            $row['method_name'] !== 'STRIPE_CARD' ||
+            $row['payment_status'] !== 'PENDING' ||
+            $row['status'] !== 'PENDING'
+        ) {
+            mysqli_commit($conn);
+            return false;
+        }
+
+        restockOrderItems($orderId, 'Stripe checkout cancelled for order #' . $orderId);
+
+        $paymentSql = "UPDATE payment SET payment_status = 'FAILED', updated_at = NOW() WHERE payment_id = ?";
+        $paymentStmt = mysqli_prepare($conn, $paymentSql);
+        if (!$paymentStmt) {
+            throw new Exception('Failed to prepare payment cancellation.');
+        }
+        mysqli_stmt_bind_param($paymentStmt, 'i', $row['payment_id']);
+        if (!mysqli_stmt_execute($paymentStmt)) {
+            throw new Exception('Failed to cancel payment.');
+        }
+
+        $orderSql = "UPDATE `order` SET status = 'CANCELLED', updated_at = NOW() WHERE order_id = ?";
+        $orderStmt = mysqli_prepare($conn, $orderSql);
+        if (!$orderStmt) {
+            throw new Exception('Failed to prepare order cancellation.');
+        }
+        mysqli_stmt_bind_param($orderStmt, 'i', $orderId);
+        if (!mysqli_stmt_execute($orderStmt)) {
+            throw new Exception('Failed to cancel order.');
+        }
+
+        mysqli_commit($conn);
+        return true;
+    } catch (Exception $e) {
+        mysqli_rollback($conn);
+        error_log('Stripe checkout cancellation failed: ' . $e->getMessage());
+        return false;
+    }
+}
+
+function cancelPendingStripeCheckoutSession(string $sessionId): bool
+{
+    global $conn;
+
+    $sessionId = trim($sessionId);
+    if ($sessionId === '') {
+        return false;
+    }
+
+    $stmt = mysqli_prepare(
+        $conn,
+        "SELECT order_id FROM payment WHERE stripe_checkout_session_id = ? LIMIT 1"
+    );
+    if (!$stmt) {
+        return false;
+    }
+    mysqli_stmt_bind_param($stmt, 's', $sessionId);
+    mysqli_stmt_execute($stmt);
+    $res = mysqli_stmt_get_result($stmt);
+    $row = mysqli_fetch_assoc($res);
+
+    return $row ? cancelPendingStripeCheckoutOrder((int)$row['order_id']) : false;
+}
+
+function releaseExpiredStripeCheckoutOrders(int $minutes = 1500): void
+{
+    global $conn;
+
+    $minutes = max(5, $minutes);
+    $sql = "
+        SELECT o.order_id
+        FROM `order` o
+        INNER JOIN payment p ON o.order_id = p.order_id
+        WHERE o.status = 'PENDING'
+          AND p.method_name = 'STRIPE_CARD'
+          AND p.payment_status = 'PENDING'
+          AND o.created_at < DATE_SUB(NOW(), INTERVAL ? MINUTE)
+        LIMIT 25
+    ";
+    $stmt = mysqli_prepare($conn, $sql);
+    if (!$stmt) {
+        return;
+    }
+    mysqli_stmt_bind_param($stmt, 'i', $minutes);
+    mysqli_stmt_execute($stmt);
+    $res = mysqli_stmt_get_result($stmt);
+
+    while ($row = mysqli_fetch_assoc($res)) {
+        cancelPendingStripeCheckoutOrder((int)$row['order_id']);
+    }
+}
+
+function getOrderEmailData(int $orderId): ?array
+{
+    global $conn;
+
+    if ($orderId <= 0) {
+        return null;
+    }
+
+    $sql = "
+        SELECT o.*,
+               c.first_name,
+               c.last_name,
+               c.email,
+               p.method_name,
+               p.payment_status
+        FROM `order` o
+        INNER JOIN customer c ON o.customer_id = c.customer_id
+        LEFT JOIN payment p ON o.order_id = p.order_id
+        WHERE o.order_id = ?
+        LIMIT 1
+    ";
+    $stmt = mysqli_prepare($conn, $sql);
+    if (!$stmt) {
+        return null;
+    }
+    mysqli_stmt_bind_param($stmt, 'i', $orderId);
+    mysqli_stmt_execute($stmt);
+    $res = mysqli_stmt_get_result($stmt);
+    $order = mysqli_fetch_assoc($res);
+    if (!$order) {
+        return null;
+    }
+
+    $items = [];
+    $itemsRes = getOrderItems($orderId);
+    if ($itemsRes) {
+        while ($item = mysqli_fetch_assoc($itemsRes)) {
+            $items[] = $item;
+        }
+    }
+
+    return ['order' => $order, 'items' => $items];
+}
+
+function buildOrderEmailHtml(array $data, string $heading, string $intro): string
+{
+    $order = $data['order'];
+    $items = $data['items'];
+    $rows = '';
+    foreach ($items as $item) {
+        $variant = [];
+        if (!empty($item['size_name'])) {
+            $variant[] = 'Size: ' . $item['size_name'];
+        }
+        if (!empty($item['colour_name'])) {
+            $variant[] = 'Color: ' . $item['colour_name'];
+        }
+        $rows .= '<tr>'
+            . '<td style="padding:8px;border-bottom:1px solid #e5e7eb;">' . htmlspecialchars((string)$item['product_name']) . '<br><small>' . htmlspecialchars(implode(', ', $variant)) . '</small></td>'
+            . '<td style="padding:8px;border-bottom:1px solid #e5e7eb;text-align:center;">' . (int)$item['quantity'] . '</td>'
+            . '<td style="padding:8px;border-bottom:1px solid #e5e7eb;text-align:right;">$' . number_format((float)$item['line_total'], 2) . '</td>'
+            . '</tr>';
+    }
+
+    $tracking = '';
+    if (!empty($order['tracking_number'])) {
+        $tracking = '<p><strong>Tracking:</strong> ' . htmlspecialchars((string)$order['tracking_number']) . '</p>';
+    }
+    if (!empty($order['shipping_carrier'])) {
+        $tracking .= '<p><strong>Carrier:</strong> ' . htmlspecialchars((string)$order['shipping_carrier']) . '</p>';
+    }
+
+    return '<div style="font-family:Arial,sans-serif;color:#111827;line-height:1.5;">'
+        . '<h2>' . htmlspecialchars($heading) . '</h2>'
+        . '<p>' . htmlspecialchars($intro) . '</p>'
+        . '<p><strong>Order:</strong> #' . (int)$order['order_id'] . '</p>'
+        . '<p><strong>Status:</strong> ' . htmlspecialchars((string)$order['status']) . '</p>'
+        . $tracking
+        . '<table style="width:100%;border-collapse:collapse;margin-top:12px;">'
+        . '<thead><tr><th style="text-align:left;padding:8px;border-bottom:2px solid #e5e7eb;">Item</th><th style="padding:8px;border-bottom:2px solid #e5e7eb;">Qty</th><th style="text-align:right;padding:8px;border-bottom:2px solid #e5e7eb;">Total</th></tr></thead>'
+        . '<tbody>' . $rows . '</tbody>'
+        . '</table>'
+        . '<p style="font-size:18px;"><strong>Total:</strong> $' . number_format((float)$order['total_amount'], 2) . '</p>'
+        . '</div>';
+}
+
+function sendOrderCustomerEmail(int $orderId, string $event): bool
+{
+    $data = getOrderEmailData($orderId);
+    if (!$data) {
+        return false;
+    }
+
+    $order = $data['order'];
+    $email = trim((string)($order['email'] ?? ''));
+    if ($email === '') {
+        return false;
+    }
+
+    $status = (string)($order['status'] ?? '');
+    $subject = 'ScanFit order #' . $orderId . ' update';
+    $intro = 'Your order has been updated.';
+    if ($event === 'placed') {
+        $subject = 'ScanFit order #' . $orderId . ' confirmation';
+        $intro = 'Thank you for your order. We have received it and will keep you updated.';
+    } elseif ($event === 'cancelled') {
+        $subject = 'ScanFit order #' . $orderId . ' cancelled';
+        $intro = 'Your order has been cancelled.';
+    } elseif ($status === 'SHIPPED') {
+        $subject = 'ScanFit order #' . $orderId . ' shipped';
+        $intro = 'Your order has shipped.';
+    } elseif ($status === 'DELIVERED') {
+        $subject = 'ScanFit order #' . $orderId . ' delivered';
+        $intro = 'Your order has been marked delivered.';
+    }
+
+    $name = trim((string)($order['first_name'] ?? ''));
+    if ($name !== '') {
+        $intro = $name . ', ' . lcfirst($intro);
+    }
+
+    return sendAppEmail($email, $subject, buildOrderEmailHtml($data, $subject, $intro));
+}
+
+function sendAdminNewOrderEmail(int $orderId): bool
+{
+    $to = getAdminNotificationEmail();
+    if ($to === '') {
+        return false;
+    }
+
+    $data = getOrderEmailData($orderId);
+    if (!$data) {
+        return false;
+    }
+
+    $subject = 'New ScanFit order #' . $orderId;
+    return sendAppEmail($to, $subject, buildOrderEmailHtml($data, $subject, 'A new order was placed.'));
+}
+
 
 function removeFromCart(int $cartItemId, int $customerId): bool
 {
@@ -2903,17 +4178,26 @@ function getCartItemCount(int $customerId): int
 // ------------- SEARCH & ORDERS -------------
 
 
-function searchProducts(string $query)
+function searchProducts(string $query, string $sort = 'name_asc')
 {
     global $conn;
 
     $term = '%' . $query . '%';
+    $orderBy = 'p.name ASC';
+    if ($sort === 'price_asc') {
+        $orderBy = 'p.base_price ASC, p.name ASC';
+    } elseif ($sort === 'price_desc') {
+        $orderBy = 'p.base_price DESC, p.name ASC';
+    } elseif ($sort === 'newest') {
+        $orderBy = 'p.created_at DESC, p.name ASC';
+    }
+
     $sql = "
         SELECT DISTINCT p.*
         FROM product p
         WHERE p.status = 'ACTIVE'
           AND (p.name LIKE ? OR p.description LIKE ? OR p.sku LIKE ?)
-        ORDER BY p.name
+        ORDER BY {$orderBy}
         LIMIT 50
     ";
 
@@ -2930,17 +4214,242 @@ function searchProducts(string $query)
 function getCustomerOrders(int $customerId)
 {
     global $conn;
+    releaseExpiredStripeCheckoutOrders();
 
     $sql = "
-        SELECT o.*, p.method_name AS payment_method
+        SELECT o.*, p.method_name AS payment_method, p.payment_status
         FROM `order` o
         LEFT JOIN payment p ON o.order_id = p.order_id
         WHERE o.customer_id = ?
+          AND (
+              p.method_name IS NULL
+              OR NOT (
+              p.method_name = 'STRIPE_CARD'
+              AND p.payment_status <> 'COMPLETED'
+              )
+          )
         ORDER BY o.created_at DESC
     ";
     $stmt = mysqli_prepare($conn, $sql);
     if (!$stmt) {
         return mysqli_query($conn, "SELECT * FROM `order` WHERE 1=0");
+    }
+    mysqli_stmt_bind_param($stmt, 'i', $customerId);
+    mysqli_stmt_execute($stmt);
+    return mysqli_stmt_get_result($stmt);
+}
+
+function getCustomerOrderDetail(int $orderId, int $customerId): ?array
+{
+    global $conn;
+
+    if ($orderId <= 0 || $customerId <= 0) {
+        return null;
+    }
+
+    releaseExpiredStripeCheckoutOrders();
+
+    $sql = "
+        SELECT o.*,
+               p.method_name AS payment_method,
+               p.payment_status,
+               a.address_line1,
+               a.address_line2,
+               a.city,
+               a.state_province,
+               a.postal_code,
+               co.name AS country_name
+        FROM `order` o
+        LEFT JOIN payment p ON o.order_id = p.order_id
+        LEFT JOIN address a ON o.shipping_address_id = a.address_id
+        LEFT JOIN country co ON a.country_id = co.country_id
+        WHERE o.order_id = ?
+          AND o.customer_id = ?
+          AND (
+              p.method_name IS NULL
+              OR NOT (
+                  p.method_name = 'STRIPE_CARD'
+                  AND p.payment_status <> 'COMPLETED'
+              )
+          )
+        LIMIT 1
+    ";
+    $stmt = mysqli_prepare($conn, $sql);
+    if (!$stmt) {
+        return null;
+    }
+    mysqli_stmt_bind_param($stmt, 'ii', $orderId, $customerId);
+    mysqli_stmt_execute($stmt);
+    $res = mysqli_stmt_get_result($stmt);
+    $order = mysqli_fetch_assoc($res);
+    if (!$order) {
+        return null;
+    }
+
+    $items = [];
+    $itemsRes = getOrderItems($orderId);
+    if ($itemsRes) {
+        while ($item = mysqli_fetch_assoc($itemsRes)) {
+            $items[] = $item;
+        }
+    }
+
+    return ['order' => $order, 'items' => $items];
+}
+
+function customerCanReviewProduct(int $customerId, int $productId): bool
+{
+    global $conn;
+
+    if ($customerId <= 0 || $productId <= 0) {
+        return false;
+    }
+
+    $sql = "
+        SELECT 1
+        FROM `order` o
+        INNER JOIN orderitem oi ON o.order_id = oi.order_id
+        INNER JOIN productvariant pv ON oi.variant_id = pv.variant_id
+        WHERE o.customer_id = ?
+          AND pv.product_id = ?
+          AND o.status = 'DELIVERED'
+        LIMIT 1
+    ";
+    $stmt = mysqli_prepare($conn, $sql);
+    if (!$stmt) {
+        return false;
+    }
+    mysqli_stmt_bind_param($stmt, 'ii', $customerId, $productId);
+    mysqli_stmt_execute($stmt);
+    $res = mysqli_stmt_get_result($stmt);
+    return mysqli_num_rows($res) > 0;
+}
+
+function saveProductReview(int $customerId, int $productId, int $rating, string $comment, ?string &$error = null): bool
+{
+    global $conn;
+
+    $error = null;
+    $rating = max(1, min(5, $rating));
+    $comment = trim($comment);
+
+    if (!customerCanReviewProduct($customerId, $productId)) {
+        $error = 'Only delivered purchases can be reviewed.';
+        return false;
+    }
+
+    $sql = "
+        INSERT INTO review (product_id, customer_id, rating, comment, created_at)
+        VALUES (?, ?, ?, ?, NOW())
+        ON DUPLICATE KEY UPDATE rating = VALUES(rating), comment = VALUES(comment), created_at = NOW()
+    ";
+    $stmt = mysqli_prepare($conn, $sql);
+    if (!$stmt) {
+        $error = 'Could not prepare review.';
+        return false;
+    }
+    mysqli_stmt_bind_param($stmt, 'iiis', $productId, $customerId, $rating, $comment);
+    if (!mysqli_stmt_execute($stmt)) {
+        $error = 'Could not save review.';
+        return false;
+    }
+
+    return true;
+}
+
+function getProductReviewSummary(int $productId): array
+{
+    global $conn;
+
+    $sql = "SELECT COUNT(*) AS review_count, AVG(rating) AS average_rating FROM review WHERE product_id = ?";
+    $stmt = mysqli_prepare($conn, $sql);
+    if (!$stmt) {
+        return ['review_count' => 0, 'average_rating' => 0.0];
+    }
+    mysqli_stmt_bind_param($stmt, 'i', $productId);
+    mysqli_stmt_execute($stmt);
+    $res = mysqli_stmt_get_result($stmt);
+    $row = mysqli_fetch_assoc($res) ?: [];
+
+    return [
+        'review_count' => (int)($row['review_count'] ?? 0),
+        'average_rating' => isset($row['average_rating']) ? (float)$row['average_rating'] : 0.0,
+    ];
+}
+
+function getProductReviews(int $productId)
+{
+    global $conn;
+
+    $sql = "
+        SELECT r.*, c.first_name, c.last_name
+        FROM review r
+        INNER JOIN customer c ON r.customer_id = c.customer_id
+        WHERE r.product_id = ?
+        ORDER BY r.created_at DESC
+    ";
+    $stmt = mysqli_prepare($conn, $sql);
+    if (!$stmt) {
+        return mysqli_query($conn, "SELECT * FROM review WHERE 1=0");
+    }
+    mysqli_stmt_bind_param($stmt, 'i', $productId);
+    mysqli_stmt_execute($stmt);
+    return mysqli_stmt_get_result($stmt);
+}
+
+function isProductWishlisted(int $customerId, int $productId): bool
+{
+    global $conn;
+
+    if ($customerId <= 0 || $productId <= 0) {
+        return false;
+    }
+
+    $stmt = mysqli_prepare($conn, "SELECT 1 FROM wishlist WHERE customer_id = ? AND product_id = ? LIMIT 1");
+    if (!$stmt) {
+        return false;
+    }
+    mysqli_stmt_bind_param($stmt, 'ii', $customerId, $productId);
+    mysqli_stmt_execute($stmt);
+    $res = mysqli_stmt_get_result($stmt);
+    return mysqli_num_rows($res) > 0;
+}
+
+function setProductWishlist(int $customerId, int $productId, bool $enabled): bool
+{
+    global $conn;
+
+    if ($customerId <= 0 || $productId <= 0) {
+        return false;
+    }
+
+    if ($enabled) {
+        $stmt = mysqli_prepare($conn, "INSERT IGNORE INTO wishlist (customer_id, product_id, created_at) VALUES (?, ?, NOW())");
+    } else {
+        $stmt = mysqli_prepare($conn, "DELETE FROM wishlist WHERE customer_id = ? AND product_id = ?");
+    }
+    if (!$stmt) {
+        return false;
+    }
+    mysqli_stmt_bind_param($stmt, 'ii', $customerId, $productId);
+    return mysqli_stmt_execute($stmt);
+}
+
+function getCustomerWishlist(int $customerId)
+{
+    global $conn;
+
+    $sql = "
+        SELECT p.*, w.created_at AS wishlisted_at
+        FROM wishlist w
+        INNER JOIN product p ON w.product_id = p.product_id
+        WHERE w.customer_id = ?
+          AND p.status = 'ACTIVE'
+        ORDER BY w.created_at DESC
+    ";
+    $stmt = mysqli_prepare($conn, $sql);
+    if (!$stmt) {
+        return mysqli_query($conn, "SELECT * FROM product WHERE 1=0");
     }
     mysqli_stmt_bind_param($stmt, 'i', $customerId);
     mysqli_stmt_execute($stmt);
@@ -2992,44 +4501,35 @@ function cancelOrder(int $orderId, int $customerId): bool
             throw new Exception('Failed to cancel order.');
         }
 
-        $itemsSql = "SELECT variant_id, quantity FROM orderitem WHERE order_id = ?";
-        $itemsStmt = mysqli_prepare($conn, $itemsSql);
-        if (!$itemsStmt) {
-            throw new Exception('Failed to load order items.');
+        $paymentStatusSql = "
+            SELECT method_name, payment_status
+            FROM payment
+            WHERE order_id = ?
+            LIMIT 1
+        ";
+        $paymentStatusStmt = mysqli_prepare($conn, $paymentStatusSql);
+        if (!$paymentStatusStmt) {
+            throw new Exception('Failed to prepare payment status lookup.');
         }
-        mysqli_stmt_bind_param($itemsStmt, 'i', $orderId);
-        mysqli_stmt_execute($itemsStmt);
-        $itemsRes = mysqli_stmt_get_result($itemsStmt);
-        while ($item = mysqli_fetch_assoc($itemsRes)) {
-            $variantId = (int)$item['variant_id'];
-            $qty = (int)$item['quantity'];
+        mysqli_stmt_bind_param($paymentStatusStmt, 'i', $orderId);
+        mysqli_stmt_execute($paymentStatusStmt);
+        $paymentStatusRes = mysqli_stmt_get_result($paymentStatusStmt);
+        $paymentRow = mysqli_fetch_assoc($paymentStatusRes) ?: [];
+        $shouldRestock = !(
+            ($paymentRow['method_name'] ?? '') === 'STRIPE_CARD'
+            && ($paymentRow['payment_status'] ?? '') !== 'COMPLETED'
+        );
 
-            $restockSql = "UPDATE productvariant SET stock_quantity = stock_quantity + ? WHERE variant_id = ?";
-            $restockStmt = mysqli_prepare($conn, $restockSql);
-            if (!$restockStmt) {
-                throw new Exception('Failed to prepare restock.');
-            }
-            mysqli_stmt_bind_param($restockStmt, 'ii', $qty, $variantId);
-            if (!mysqli_stmt_execute($restockStmt) || mysqli_stmt_affected_rows($restockStmt) !== 1) {
-                throw new Exception('Failed to restock variant.');
-            }
-
-            $auditSql = "
-                INSERT INTO stockmovement (variant_id, movement_type, quantity, reference_id, notes)
-                VALUES (?, 'IN', ?, ?, ?)
-            ";
-            $auditNote = 'Order #' . $orderId . ' cancelled by customer';
-            $auditStmt = mysqli_prepare($conn, $auditSql);
-            if (!$auditStmt) {
-                throw new Exception('Failed to prepare stock audit.');
-            }
-            mysqli_stmt_bind_param($auditStmt, 'iiis', $variantId, $qty, $orderId, $auditNote);
-            if (!mysqli_stmt_execute($auditStmt)) {
-                throw new Exception('Failed to save stock audit.');
-            }
+        if (!$shouldRestock) {
+            mysqli_commit($conn);
+            sendOrderCustomerEmail($orderId, 'cancelled');
+            return true;
         }
+
+        restockOrderItems($orderId, 'Order #' . $orderId . ' cancelled by customer');
 
         mysqli_commit($conn);
+        sendOrderCustomerEmail($orderId, 'cancelled');
         return true;
     } catch (Exception $e) {
         mysqli_rollback($conn);

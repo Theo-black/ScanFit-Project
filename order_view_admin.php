@@ -17,9 +17,20 @@ $sql = "
     SELECT o.*, 
            c.first_name,
            c.last_name,
-           c.email
+           c.email,
+           a.address_line1,
+           a.address_line2,
+           a.city,
+           a.state_province,
+           a.postal_code,
+           co.name AS country_name,
+           p.method_name,
+           p.payment_status
     FROM `order` o
     JOIN customer c ON o.customer_id = c.customer_id
+    LEFT JOIN address a ON o.shipping_address_id = a.address_id
+    LEFT JOIN country co ON a.country_id = co.country_id
+    LEFT JOIN payment p ON o.order_id = p.order_id
     WHERE o.order_id = ?
     LIMIT 1
 ";
@@ -54,6 +65,7 @@ if ($orderItems && mysqli_num_rows($orderItems) > 0) {
         $items[]      = $row;
     }
 }
+$returnRequests = getReturnRequestsForOrder($orderId);
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -168,11 +180,36 @@ if ($orderItems && mysqli_num_rows($orderItems) > 0) {
             background:#111827;
             color:#e5e7eb;
         }
+        .btn-primary{
+            background:#38bdf8;
+            color:#0f172a;
+        }
         .btn-danger{
             background:#ff4d4f;
             color:#fff;
         }
         .btn-danger:hover{background:#e04345}
+        .status-form{
+            display:flex;
+            gap:.7rem;
+            align-items:end;
+            flex-wrap:wrap;
+            margin-top:.8rem;
+        }
+        .status-form select,
+        .status-form input{
+            min-width:180px;
+            padding:.55rem .7rem;
+            border-radius:8px;
+            border:1px solid #1f2937;
+            background:#020617;
+            color:#e5e7eb;
+            font-size:.9rem;
+        }
+        .return-list{margin-top:1.5rem;border-top:1px solid #111827;padding-top:1rem}
+        .return-row{padding:.85rem 0;border-top:1px solid #111827}
+        .return-row:first-of-type{border-top:none}
+        .return-status{display:inline-block;border-radius:999px;padding:.2rem .6rem;background:#312e81;color:#c7d2fe;font-weight:800;font-size:.75rem}
     </style>
 </head>
 <body>
@@ -212,6 +249,39 @@ if ($orderItems && mysqli_num_rows($orderItems) > 0) {
                     <?php echo htmlspecialchars($status); ?>
                 </span>
             </div>
+            <?php if (
+                in_array($_SESSION['admin_role'] ?? '', ['SUPER_ADMIN', 'ADMIN'], true) &&
+                !in_array($order['status'], ['CANCELLED', 'DELIVERED'], true)
+            ): ?>
+                <form action="admin_update_order_status.php" method="POST" class="status-form">
+                    <?php echo csrfInput(); ?>
+                    <input type="hidden" name="order_id" value="<?php echo (int)$order['order_id']; ?>">
+                    <div>
+                        <div class="field-label">Move Order To</div>
+                        <select name="status" required>
+                            <?php
+                            $statusOptions = ['PENDING', 'PROCESSING', 'SHIPPED', 'DELIVERED'];
+                            $statusRank = ['PENDING' => 1, 'PROCESSING' => 2, 'SHIPPED' => 3, 'DELIVERED' => 4];
+                            foreach ($statusOptions as $statusOption):
+                                $disabled = ($statusRank[$statusOption] ?? 0) < ($statusRank[$order['status']] ?? 0);
+                            ?>
+                                <option value="<?php echo $statusOption; ?>" <?php echo $order['status'] === $statusOption ? 'selected' : ''; ?> <?php echo $disabled ? 'disabled' : ''; ?>>
+                                    <?php echo htmlspecialchars($statusOption); ?>
+                                </option>
+                            <?php endforeach; ?>
+                        </select>
+                    </div>
+                    <div>
+                        <div class="field-label">Carrier</div>
+                        <input type="text" name="shipping_carrier" maxlength="100" value="<?php echo htmlspecialchars((string)($order['shipping_carrier'] ?? '')); ?>" placeholder="USPS, FedEx, DHL">
+                    </div>
+                    <div>
+                        <div class="field-label">Tracking Number</div>
+                        <input type="text" name="tracking_number" maxlength="191" value="<?php echo htmlspecialchars((string)($order['tracking_number'] ?? '')); ?>" placeholder="Required when shipped">
+                    </div>
+                    <button type="submit" class="btn btn-primary">Update Status</button>
+                </form>
+            <?php endif; ?>
         </div>
 
         <div>
@@ -227,6 +297,53 @@ if ($orderItems && mysqli_num_rows($orderItems) > 0) {
         </div>
 
         <div>
+            <div class="section-title">Ship To</div>
+            <?php if (!empty($order['address_line1'])): ?>
+                <div class="field-label">Address</div>
+                <div class="field-value">
+                    <?php echo htmlspecialchars((string)$order['address_line1']); ?>
+                    <?php if (!empty($order['address_line2'])): ?>
+                        <br><?php echo htmlspecialchars((string)$order['address_line2']); ?>
+                    <?php endif; ?>
+                    <br>
+                    <?php
+                    $cityLine = array_filter([
+                        (string)($order['city'] ?? ''),
+                        (string)($order['state_province'] ?? ''),
+                        (string)($order['postal_code'] ?? ''),
+                    ]);
+                    echo htmlspecialchars(implode(', ', $cityLine));
+                    ?>
+                    <?php if (!empty($order['country_name'])): ?>
+                        <br><?php echo htmlspecialchars((string)$order['country_name']); ?>
+                    <?php endif; ?>
+                </div>
+            <?php else: ?>
+                <div class="field-value">No shipping address linked.</div>
+            <?php endif; ?>
+        </div>
+
+        <div>
+            <div class="section-title">Shipping</div>
+            <div class="field-label">Carrier</div>
+            <div class="field-value">
+                <?php echo htmlspecialchars((string)($order['shipping_carrier'] ?? 'Not set')); ?>
+            </div>
+            <div class="field-label" style="margin-top:.4rem;">Tracking</div>
+            <div class="field-value">
+                <?php echo htmlspecialchars((string)($order['tracking_number'] ?? 'Not set')); ?>
+            </div>
+            <?php if (!empty($order['shipped_at'])): ?>
+                <div class="field-label" style="margin-top:.4rem;">Shipped At</div>
+                <div class="field-value"><?php echo htmlspecialchars((string)$order['shipped_at']); ?></div>
+            <?php endif; ?>
+            <?php if (!empty($order['delivered_at'])): ?>
+                <div class="field-label" style="margin-top:.4rem;">Delivered At</div>
+                <div class="field-value"><?php echo htmlspecialchars((string)$order['delivered_at']); ?></div>
+            <?php endif; ?>
+        </div>
+
+        <div>
             <div class="section-title">Amounts</div>
             <div class="field-label">Order Total (calculated)</div>
             <div class="field-value">
@@ -238,6 +355,13 @@ if ($orderItems && mysqli_num_rows($orderItems) > 0) {
                     $<?php echo number_format((float)$order['total_amount'], 2); ?>
                 </div>
             <?php endif; ?>
+            <div class="field-label" style="margin-top:.4rem;">Payment</div>
+            <div class="field-value">
+                <?php echo htmlspecialchars($order['method_name'] ?? 'N/A'); ?>
+                <?php if (!empty($order['payment_status'])): ?>
+                    (<?php echo htmlspecialchars($order['payment_status']); ?>)
+                <?php endif; ?>
+            </div>
         </div>
     </div>
 
@@ -295,6 +419,28 @@ if ($orderItems && mysqli_num_rows($orderItems) > 0) {
         <p>No items found for this order.</p>
     <?php endif; ?>
 
+    <div class="return-list">
+        <div class="section-title">Returns</div>
+        <?php if (empty($returnRequests)): ?>
+            <div class="field-value">No return requests for this order.</div>
+        <?php else: ?>
+            <?php foreach ($returnRequests as $request): ?>
+                <div class="return-row">
+                    <span class="return-status"><?php echo htmlspecialchars((string)$request['status']); ?></span>
+                    <div class="field-value" style="margin-top:.35rem;">
+                        <?php echo htmlspecialchars((string)($request['product_name'] ?? 'Entire order')); ?>
+                    </div>
+                    <div class="item-meta"><?php echo htmlspecialchars((string)$request['created_at']); ?></div>
+                    <div style="margin-top:.35rem;"><?php echo nl2br(htmlspecialchars((string)$request['reason'])); ?></div>
+                    <?php if (!empty($request['admin_notes'])): ?>
+                        <div class="item-meta" style="margin-top:.35rem;">Admin note: <?php echo nl2br(htmlspecialchars((string)$request['admin_notes'])); ?></div>
+                    <?php endif; ?>
+                    <div style="margin-top:.45rem;"><a href="returns_admin.php">Manage returns</a></div>
+                </div>
+            <?php endforeach; ?>
+        <?php endif; ?>
+    </div>
+
     <div class="actions">
         <a href="orders_admin.php" class="btn btn-secondary">← Back to Orders</a>
 
@@ -321,6 +467,20 @@ if ($orderItems && mysqli_num_rows($orderItems) > 0) {
                 <input type="hidden" name="order_id"
                        value="<?php echo (int)$order['order_id']; ?>">
                 <button type="submit" class="btn btn-danger">Delete Order</button>
+            </form>
+        <?php endif; ?>
+
+        <?php if (
+            ($order['method_name'] ?? '') === 'STRIPE_CARD' &&
+            ($order['payment_status'] ?? '') === 'COMPLETED' &&
+            in_array($_SESSION['admin_role'] ?? '', ['SUPER_ADMIN', 'ADMIN'], true)
+        ): ?>
+            <form action="admin_refund_order.php" method="POST"
+                  onsubmit="return confirm('Refund this Stripe payment?');">
+                <?php echo csrfInput(); ?>
+                <input type="hidden" name="order_id"
+                       value="<?php echo (int)$order['order_id']; ?>">
+                <button type="submit" class="btn btn-danger">Refund Stripe Payment</button>
             </form>
         <?php endif; ?>
     </div>

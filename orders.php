@@ -71,7 +71,11 @@ unset($_SESSION['error'], $_SESSION['success']);
         .status-delivered{background:#d4edda;color:#155724}
         .status-cancelled{background:#f8d7da;color:#721c24}
         .order-actions{
-            margin-top:.5rem;
+            margin-top:.5rem;display:flex;gap:.5rem;flex-wrap:wrap
+        }
+        .details-btn{
+            display:inline-block;padding:.4rem .9rem;border-radius:999px;
+            background:#4f46e5;color:#fff;text-decoration:none;font-size:.8rem;font-weight:700
         }
         /* Cancel order button styling */
         .cancel-btn{
@@ -191,8 +195,9 @@ unset($_SESSION['error'], $_SESSION['success']);
                                 </span>
 
                                 <!-- Show cancel action only for pending/processing orders -->
-                                <?php if (in_array($order['status'], ['PENDING','PROCESSING'], true)): ?>
-                                    <div class="order-actions">
+                                <div class="order-actions">
+                                    <a class="details-btn" href="order_detail.php?id=<?php echo (int)$order['order_id']; ?>">View Details</a>
+                                    <?php if (in_array($order['status'], ['PENDING','PROCESSING'], true)): ?>
                                         <form action="cancel_order.php" method="POST"
                                               onsubmit="return confirm('Cancel this order?');">
                                             <?php echo csrfInput(); ?>
@@ -202,8 +207,8 @@ unset($_SESSION['error'], $_SESSION['success']);
                                                 Cancel Order
                                             </button>
                                         </form>
-                                    </div>
-                                <?php endif; ?>
+                                    <?php endif; ?>
+                                </div>
                             </div>
                         </div>
 
@@ -213,6 +218,20 @@ unset($_SESSION['error'], $_SESSION['success']);
                                 $<?php echo number_format($order['total_amount'], 2); ?>
                             </div>
                         </div>
+
+                        <?php if (in_array($order['status'], ['SHIPPED', 'DELIVERED'], true)): ?>
+                            <div class="order-info-item">
+                                <div class="order-label">Tracking</div>
+                                <div class="order-value">
+                                    <?php echo htmlspecialchars((string)($order['tracking_number'] ?? 'Pending')); ?>
+                                </div>
+                                <?php if (!empty($order['shipping_carrier'])): ?>
+                                    <div class="order-label" style="margin-top:.3rem;">
+                                        <?php echo htmlspecialchars((string)$order['shipping_carrier']); ?>
+                                    </div>
+                                <?php endif; ?>
+                            </div>
+                        <?php endif; ?>
                     </div>
 
                     <!-- Line items for this order -->

@@ -128,6 +128,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 }
             }
 
+            if (!saveProductImageUpload($_FILES['product_image'] ?? [], $sku, $imageError)) {
+                throw new Exception($imageError ?? 'Could not save product image.');
+            }
+
             mysqli_commit($conn);
             $created = true;
         } catch (Throwable $e) {
@@ -218,7 +222,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         <div class="msg msg-error"><?php echo htmlspecialchars($error); ?></div>
     <?php endif; ?>
 
-    <form method="POST">
+    <form method="POST" enctype="multipart/form-data">
         <?php echo csrfInput(); ?>
         <div class="form-group">
             <label>Name</label>
@@ -278,6 +282,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         <div class="form-group">
             <label>Description</label>
             <textarea name="description"><?php echo htmlspecialchars($_POST['description'] ?? ''); ?></textarea>
+        </div>
+
+        <div class="form-group">
+            <label>Product Image</label>
+            <input type="file" name="product_image" accept="image/jpeg">
+            <small style="display:block;margin-top:.35rem;color:#94a3b8;">Upload a JPEG image. It will be saved as images/SKU.jpg.</small>
         </div>
 
         <div class="form-group">

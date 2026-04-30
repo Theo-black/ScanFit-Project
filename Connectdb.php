@@ -1,9 +1,6 @@
 <?php
 // connectdb.php
-// Start a new session if one is not already active
-if (session_status() === PHP_SESSION_NONE) {
-    session_start();
-}
+// Database bootstrap only. Session handling is centralized in functions.php.
 
 function loadLocalEnvFile(string $path): void
 {

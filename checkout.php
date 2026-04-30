@@ -4,11 +4,18 @@
 // Load shared functions and enforce that the user is logged in
 require_once 'functions.php';
 requireLogin();
+releaseExpiredStripeCheckoutOrders();
 
 // Get current customer's ID and fetch their cart items and total
 $customerId = getCustomerId();
 $cartItems = getCartItems($customerId);
 $cartTotal = getCartTotal($customerId);
+$pricingConfig = getStorePricingConfig();
+$shippingCost = $pricingConfig['flat_shipping'];
+$taxRate = $pricingConfig['tax_rate'];
+$couponState = getActiveCartCoupon($cartTotal);
+$couponDiscount = $couponState['discount'];
+$taxableSubtotal = max(0, $cartTotal - $couponDiscount);
 
 // If the cart is empty, redirect back to the cart page
 if (mysqli_num_rows($cartItems) === 0) {
@@ -18,6 +25,14 @@ if (mysqli_num_rows($cartItems) === 0) {
 
 // Initialize error and success flags for checkout processing
 $error = null;
+$stripeConfigured = isStripeConfigured();
+if (isset($_GET['payment_cancelled'])) {
+    $cancelledOrderId = (int)($_GET['order_id'] ?? 0);
+    if ($cancelledOrderId > 0) {
+        cancelPendingStripeCheckoutOrder($cancelledOrderId, $customerId);
+    }
+    $error = 'Card payment was cancelled. Your card was not charged.';
+}
 
 // Handle checkout form submission via POST
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -29,7 +44,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $postalCode = trim($_POST['postal_code'] ?? '');
     $countryId = (int)($_POST['country_id'] ?? 0);
     $paymentMethod = $_POST['payment_method'] ?? '';
-    $allowedMethods = ['CREDIT_CARD', 'DEBIT_CARD', 'PAYPAL', 'CASH_ON_DELIVERY'];
+    $allowedMethods = ['CASH_ON_DELIVERY'];
+    if ($stripeConfigured) {
+        $allowedMethods[] = 'STRIPE_CARD';
+    }
+    $isStripeCard = $paymentMethod === 'STRIPE_CARD';
 
     // Basic validation to ensure all required fields are present
     if (
@@ -37,6 +56,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $countryId <= 0 || !in_array($paymentMethod, $allowedMethods, true)
     ) {
         $error = 'Please fill in all fields';
+    } elseif ($isStripeCard && !$stripeConfigured) {
+        $error = 'Card payments are not configured yet. Please contact the store owner.';
     } else {
         // Start a database transaction to process the order atomically
         mysqli_begin_transaction($conn);
@@ -48,9 +69,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
 
             // Calculate shipping, tax, and final total for the order
-            $shippingCost = 5.00;
-            $tax = $cartTotal * 0.10;
-            $total = $cartTotal + $shippingCost + $tax;
+            $tax = $taxableSubtotal * $taxRate;
+            $total = $taxableSubtotal + $shippingCost + $tax;
 
             // Persist checkout shipping address for this customer
             $insertAddressSql = "
@@ -65,38 +85,60 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if (!mysqli_stmt_execute($stmt)) {
                 throw new Exception('Failed to save shipping address.');
             }
+            $addressId = mysqli_insert_id($conn);
 
             // Insert a new order row for this customer
             $insertOrderSql = "
-                INSERT INTO `order` (customer_id, order_date, status, total_amount, created_at)
-                VALUES (?, NOW(), 'PENDING', ?, NOW())
+                INSERT INTO `order` (customer_id, shipping_address_id, order_date, status, total_amount, created_at)
+                VALUES (?, ?, NOW(), 'PENDING', ?, NOW())
             ";
             $stmt = mysqli_prepare($conn, $insertOrderSql);
             if (!$stmt) {
                 throw new Exception('Failed to prepare order insert.');
             }
-            mysqli_stmt_bind_param($stmt, 'id', $customerId, $total);
+            mysqli_stmt_bind_param($stmt, 'iid', $customerId, $addressId, $total);
             if (!mysqli_stmt_execute($stmt)) {
                 throw new Exception('Failed to create order.');
             }
             // Retrieve the newly created order ID
             $orderId = mysqli_insert_id($conn);
 
+            if ($couponDiscount > 0 && $couponState['coupon']) {
+                $orderCouponSql = "
+                    INSERT INTO order_coupon (order_id, coupon_id, code, discount_amount, created_at)
+                    VALUES (?, ?, ?, ?, NOW())
+                ";
+                $orderCouponStmt = mysqli_prepare($conn, $orderCouponSql);
+                if (!$orderCouponStmt) {
+                    throw new Exception('Failed to prepare coupon record.');
+                }
+                $couponId = (int)$couponState['coupon']['coupon_id'];
+                $couponCode = (string)$couponState['coupon']['code'];
+                mysqli_stmt_bind_param($orderCouponStmt, 'iisd', $orderId, $couponId, $couponCode, $couponDiscount);
+                if (!mysqli_stmt_execute($orderCouponStmt)) {
+                    throw new Exception('Failed to save coupon record.');
+                }
+            }
+
             $paymentInsertSql = "
-                INSERT INTO payment (order_id, method_name, payment_status, amount, payment_date)
-                VALUES (?, ?, 'PENDING', ?, NOW())
+                INSERT INTO payment (order_id, method_name, payment_status, amount, payment_date, provider)
+                VALUES (?, ?, 'PENDING', ?, NOW(), ?)
             ";
             $paymentStmt = mysqli_prepare($conn, $paymentInsertSql);
             if (!$paymentStmt) {
                 throw new Exception('Failed to prepare payment insert.');
             }
-            mysqli_stmt_bind_param($paymentStmt, 'isd', $orderId, $paymentMethod, $total);
+            $paymentProvider = $isStripeCard ? 'stripe' : null;
+            mysqli_stmt_bind_param($paymentStmt, 'isds', $orderId, $paymentMethod, $total, $paymentProvider);
             if (!mysqli_stmt_execute($paymentStmt)) {
                 throw new Exception('Failed to create payment record.');
             }
+            $paymentId = mysqli_insert_id($conn);
 
             // Loop through cart items and create corresponding order items
             mysqli_data_seek($cartItems, 0);
+            $stripeLineItems = [];
+            $stripeConfig = getStripeConfig();
             while ($item = mysqli_fetch_assoc($cartItems)) {
                 $lineTotal = ($item['base_price'] + ($item['price_adjustment'] ?? 0)) * $item['quantity'];
                 $insertItemSql = "
@@ -111,6 +153,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 mysqli_stmt_bind_param($stmt, 'iiidd', $orderId, $item['variant_id'], $item['quantity'], $unitPrice, $lineTotal);
                 if (!mysqli_stmt_execute($stmt)) {
                     throw new Exception('Failed to insert order item.');
+                }
+
+                if ($isStripeCard && $couponDiscount <= 0) {
+                    $variantLabel = trim(($item['size_name'] ?? '') . ' ' . ($item['colour_name'] ?? ''));
+                    $stripeLineItems[] = [
+                        'price_data' => [
+                            'currency' => $stripeConfig['currency'],
+                            'product_data' => [
+                                'name' => trim($item['product_name'] . ($variantLabel !== '' ? ' - ' . $variantLabel : '')),
+                            ],
+                            'unit_amount' => (int)round($unitPrice * 100),
+                        ],
+                        'quantity' => (int)$item['quantity'],
+                    ];
                 }
 
                 // Decrease stock for each purchased variant
@@ -133,7 +189,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     INSERT INTO stockmovement (variant_id, movement_type, quantity, reference_id, notes)
                     VALUES (?, 'OUT', ?, ?, ?)
                 ";
-                $stockNotes = 'Checkout order #' . $orderId;
+                $stockNotes = ($isStripeCard ? 'Reserved for Stripe checkout order #' : 'Checkout order #') . $orderId;
                 $stockStmt = mysqli_prepare($conn, $stockAuditSql);
                 if (!$stockStmt) {
                     throw new Exception('Failed to prepare stock audit.');
@@ -151,6 +207,70 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 }
             }
 
+            if ($isStripeCard) {
+                if ($couponDiscount > 0) {
+                    $stripeLineItems[] = [
+                        'price_data' => [
+                            'currency' => $stripeConfig['currency'],
+                            'product_data' => ['name' => 'Discounted items subtotal'],
+                            'unit_amount' => (int)round($taxableSubtotal * 100),
+                        ],
+                        'quantity' => 1,
+                    ];
+                }
+                $stripeLineItems[] = [
+                    'price_data' => [
+                        'currency' => $stripeConfig['currency'],
+                        'product_data' => ['name' => 'Shipping'],
+                        'unit_amount' => (int)round($shippingCost * 100),
+                    ],
+                    'quantity' => 1,
+                ];
+                $stripeLineItems[] = [
+                    'price_data' => [
+                        'currency' => $stripeConfig['currency'],
+                        'product_data' => ['name' => 'Tax'],
+                        'unit_amount' => (int)round($tax * 100),
+                    ],
+                    'quantity' => 1,
+                ];
+
+                $customer = getCustomerInfo($customerId);
+                $checkoutSession = createStripeCheckoutSession(
+                    $stripeLineItems,
+                    $orderId,
+                    $customerId,
+                    $customer['email'] ?? null
+                );
+
+                $sessionId = (string)($checkoutSession['id'] ?? '');
+                $checkoutUrl = (string)($checkoutSession['url'] ?? '');
+                if ($sessionId === '' || $checkoutUrl === '') {
+                    throw new Exception('Stripe did not return a checkout URL.');
+                }
+
+                $metadataJson = json_encode($checkoutSession, JSON_UNESCAPED_SLASHES);
+                $updatePaymentSql = "
+                    UPDATE payment
+                    SET stripe_checkout_session_id = ?,
+                        metadata_json = ?,
+                        updated_at = NOW()
+                    WHERE payment_id = ?
+                ";
+                $updatePaymentStmt = mysqli_prepare($conn, $updatePaymentSql);
+                if (!$updatePaymentStmt) {
+                    throw new Exception('Failed to prepare Stripe payment update.');
+                }
+                mysqli_stmt_bind_param($updatePaymentStmt, 'ssi', $sessionId, $metadataJson, $paymentId);
+                if (!mysqli_stmt_execute($updatePaymentStmt)) {
+                    throw new Exception('Failed to save Stripe checkout session.');
+                }
+
+                mysqli_commit($conn);
+                header('Location: ' . $checkoutUrl, true, 303);
+                exit();
+            }
+
             // Mark the customer's active cart as completed
             $clearCartSql = "UPDATE cart SET status = 'COMPLETED' WHERE customer_id = ? AND status = 'ACTIVE'";
             $stmt = mysqli_prepare($conn, $clearCartSql);
@@ -161,9 +281,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if (!mysqli_stmt_execute($stmt)) {
                 throw new Exception('Failed to clear cart.');
             }
+            unset($_SESSION['cart_coupon_code']);
 
             // Commit all order-related changes
             mysqli_commit($conn);
+            sendOrderCustomerEmail($orderId, 'placed');
+            sendAdminNewOrderEmail($orderId);
 
             // Redirect to orders page with a success flag
             header('Location: orders.php?success=1');
@@ -172,6 +295,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         } catch (Exception $e) {
             // Roll back all changes if any step fails
             mysqli_rollback($conn);
+            error_log('Checkout failed: ' . $e->getMessage());
             $error = 'Order processing failed. Please try again.';
         }
     }
@@ -320,23 +444,15 @@ $countries = mysqli_query($conn, "SELECT * FROM country ORDER BY name");
 
                 <div class="payment-options">
                     <!-- Payment method radio options -->
-                    <label class="payment-option">
-                        <input type="radio" name="payment_method" value="CREDIT_CARD" required>
-                        <span>Credit Card</span>
-                    </label>
+                    <?php if ($stripeConfigured): ?>
+                        <label class="payment-option">
+                            <input type="radio" name="payment_method" value="STRIPE_CARD" required>
+                            <span>Credit or Debit Card</span>
+                        </label>
+                    <?php endif; ?>
 
                     <label class="payment-option">
-                        <input type="radio" name="payment_method" value="DEBIT_CARD">
-                        <span>Debit Card</span>
-                    </label>
-
-                    <label class="payment-option">
-                        <input type="radio" name="payment_method" value="PAYPAL">
-                        <span>PayPal</span>
-                    </label>
-
-                    <label class="payment-option">
-                        <input type="radio" name="payment_method" value="CASH_ON_DELIVERY">
+                        <input type="radio" name="payment_method" value="CASH_ON_DELIVERY" required>
                         <span>Cash on Delivery</span>
                     </label>
                 </div>
@@ -357,17 +473,17 @@ $countries = mysqli_query($conn, "SELECT * FROM country ORDER BY name");
 
             <div class="summary-item">
                 <span>Shipping</span>
-                <span>$5.00</span>
+                <span>$<?php echo number_format($shippingCost, 2); ?></span>
             </div>
 
             <div class="summary-item">
-                <span>Tax (10%)</span>
-                <span>$<?php echo number_format($cartTotal * 0.10, 2); ?></span>
+                <span>Tax (<?php echo number_format($taxRate * 100, 1); ?>%)</span>
+                <span>$<?php echo number_format($cartTotal * $taxRate, 2); ?></span>
             </div>
 
             <div class="summary-item summary-total">
                 <span>Total</span>
-                <span>$<?php echo number_format($cartTotal + 5 + ($cartTotal * 0.10), 2); ?></span>
+                <span>$<?php echo number_format($cartTotal + $shippingCost + ($cartTotal * $taxRate), 2); ?></span>
             </div>
         </div>
     </div>

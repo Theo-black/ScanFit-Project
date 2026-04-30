@@ -25,6 +25,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if (!updateCartItemQuantity($cartItemId, $customerId, $quantity)) {
                 $_SESSION['error'] = 'Requested quantity exceeds available stock.';
             }
+        } elseif ($_POST['action'] === 'apply_coupon') {
+            $code = normalizeCouponCode((string)($_POST['coupon_code'] ?? ''));
+            if ($code === '') {
+                unset($_SESSION['cart_coupon_code']);
+            } elseif (getCouponByCode($code)) {
+                $_SESSION['cart_coupon_code'] = $code;
+            } else {
+                $_SESSION['error'] = 'Coupon code is invalid or expired.';
+            }
+        } elseif ($_POST['action'] === 'remove_coupon') {
+            unset($_SESSION['cart_coupon_code']);
         }
     }
     // After processing, reload cart page to reflect changes (PRG pattern)
@@ -35,6 +46,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 // Fetch all cart items and the current cart total for this customer
 $cartItems = getCartItems($customerId);
 $cartTotal = getCartTotal($customerId);
+$pricingConfig = getStorePricingConfig();
+$shippingCost = $pricingConfig['flat_shipping'];
+$taxRate = $pricingConfig['tax_rate'];
+$couponState = getActiveCartCoupon($cartTotal);
+$couponDiscount = $couponState['discount'];
+$taxableSubtotal = max(0, $cartTotal - $couponDiscount);
 $errorMsg = $_SESSION['error'] ?? null;
 unset($_SESSION['error']);
 ?>
@@ -126,6 +143,10 @@ unset($_SESSION['error']);
             transition:transform .2s;margin-top:1rem
         }
         .checkout-btn:hover{transform:translateY(-2px)}
+        .coupon-form{display:flex;gap:.5rem;margin:1rem 0;flex-wrap:wrap}
+        .coupon-form input{flex:1;min-width:140px;padding:.65rem;border:2px solid #e1e4e8;border-radius:8px}
+        .coupon-form button{padding:.65rem .8rem;border:none;border-radius:8px;background:#667eea;color:#fff;font-weight:700;cursor:pointer}
+        .coupon-remove{background:#ef4444!important}
         .empty-cart{
             /* Card shown when the cart has no items */
             text-align:center;padding:4rem 2rem;background:#fff;
@@ -229,17 +250,37 @@ unset($_SESSION['error']);
 
                 <div class="summary-row">
                     <span>Shipping</span>
-                    <span>$5.00</span>
+                    <span>$<?php echo number_format($shippingCost, 2); ?></span>
                 </div>
 
+                <form method="POST" class="coupon-form">
+                    <?php echo csrfInput(); ?>
+                    <?php if ($couponState['coupon']): ?>
+                        <input type="hidden" name="action" value="remove_coupon">
+                        <input type="text" value="<?php echo htmlspecialchars($couponState['code']); ?> applied" disabled>
+                        <button type="submit" class="coupon-remove">Remove</button>
+                    <?php else: ?>
+                        <input type="hidden" name="action" value="apply_coupon">
+                        <input type="text" name="coupon_code" placeholder="Coupon code">
+                        <button type="submit">Apply</button>
+                    <?php endif; ?>
+                </form>
+
+                <?php if ($couponDiscount > 0): ?>
+                    <div class="summary-row">
+                        <span>Discount</span>
+                        <span>-$<?php echo number_format($couponDiscount, 2); ?></span>
+                    </div>
+                <?php endif; ?>
+
                 <div class="summary-row">
-                    <span>Tax (10%)</span>
-                    <span>$<?php echo number_format($cartTotal * 0.10, 2); ?></span>
+                    <span>Tax (<?php echo number_format($taxRate * 100, 1); ?>%)</span>
+                    <span>$<?php echo number_format($taxableSubtotal * $taxRate, 2); ?></span>
                 </div>
 
                 <div class="summary-row">
                     <span>Total</span>
-                    <span>$<?php echo number_format($cartTotal + 5 + ($cartTotal * 0.10), 2); ?></span>
+                    <span>$<?php echo number_format($taxableSubtotal + $shippingCost + ($taxableSubtotal * $taxRate), 2); ?></span>
                 </div>
 
                 <!-- Link styled as button that leads to checkout flow -->

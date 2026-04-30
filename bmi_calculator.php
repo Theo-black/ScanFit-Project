@@ -320,6 +320,46 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     requireCsrfPost('bmi_calculator.php');
 
+    if (isset($_POST['calculator_profile_mode'])) {
+        $postedProfileMode = (($_POST['calculator_profile_mode'] ?? 'self') === 'other') ? 'other' : 'self';
+        if ($postedProfileMode === 'other') {
+            $postedHeightUnit = (($_POST['calculator_height_unit'] ?? 'cm') === 'ft') ? 'ft' : 'cm';
+            $postedWeightUnit = (($_POST['calculator_weight_unit'] ?? 'kg') === 'lb') ? 'lb' : 'kg';
+            $postedHeightRaw = max(0, (float)($_POST['calculator_height_cm'] ?? 0));
+            $postedWeightRaw = max(0, (float)($_POST['calculator_weight_kg'] ?? 0));
+            $postedProfile = [
+                'mode' => 'other',
+                'gender' => in_array(($_POST['calculator_gender'] ?? ''), ['Male', 'Female'], true) ? $_POST['calculator_gender'] : '',
+                'height_cm' => $postedHeightUnit === 'ft' ? ($postedHeightRaw * 30.48) : $postedHeightRaw,
+                'weight_kg' => $postedWeightUnit === 'lb' ? ($postedWeightRaw / 2.2046226218) : $postedWeightRaw,
+                'height_unit' => $postedHeightUnit,
+                'weight_unit' => $postedWeightUnit,
+                'chest_cm' => max(0, (float)($_POST['calculator_chest_cm'] ?? 0)),
+                'waist_cm' => max(0, (float)($_POST['calculator_waist_cm'] ?? 0)),
+                'hips_cm' => max(0, (float)($_POST['calculator_hips_cm'] ?? 0)),
+            ];
+            $_SESSION['calculator_profile_context'] = $postedProfile;
+            $activeProfileMode = 'other';
+            $activeGender = $postedProfile['gender'];
+            $activeHeightCm = $postedProfile['height_cm'] > 0 ? (float)$postedProfile['height_cm'] : null;
+            $activeWeightKg = $postedProfile['weight_kg'] > 0 ? (float)$postedProfile['weight_kg'] : null;
+            $activeChestCm = $postedProfile['chest_cm'] > 0 ? (float)$postedProfile['chest_cm'] : null;
+            $activeWaistCm = $postedProfile['waist_cm'] > 0 ? (float)$postedProfile['waist_cm'] : null;
+            $activeHipsCm = $postedProfile['hips_cm'] > 0 ? (float)$postedProfile['hips_cm'] : null;
+            $activeProfileLabel = 'someone else';
+        } else {
+            unset($_SESSION['calculator_profile_context']);
+            $activeProfileMode = 'self';
+            $activeGender = $savedGender;
+            $activeHeightCm = $savedHeightCm;
+            $activeWeightKg = $savedWeightKg;
+            $activeChestCm = $savedChestCm;
+            $activeWaistCm = $savedWaistCm;
+            $activeHipsCm = $savedHipsCm;
+            $activeProfileLabel = 'your saved profile';
+        }
+    }
+
     $gender = $activeGender;
     $sizingMethod = $_POST['sizing_method'] ?? 'bmi';
     if (!in_array($sizingMethod, ['bmi', 'camera'], true)) {
@@ -525,6 +565,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             exit;
         }
     }
+}
+
+$scanPopupResult = null;
+$scanPopupTitle = '';
+$scanPopupContext = '';
+if (is_array($uploadPhotoFlashResult) && ($uploadPhotoFlashResult['method'] ?? '') === 'camera' && ($uploadPhotoFlashResult['scan_source'] ?? '') === 'photo') {
+    $scanPopupResult = $uploadPhotoFlashResult;
+    $scanPopupTitle = 'Uploaded Photo Result';
+    $scanPopupContext = 'upload';
+} elseif (is_array($result) && ($result['method'] ?? '') === 'camera' && ($result['scan_source'] ?? '') === 'camera') {
+    $scanPopupResult = $result;
+    $scanPopupTitle = 'Live Camera Result';
+    $scanPopupContext = 'live';
 }
 ?>
 <!DOCTYPE html>
@@ -819,6 +872,55 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         .photo-result-meta{
             font-size:.9rem;
             color:#155e75;
+        }
+        .result-modal{
+            position:fixed;
+            inset:0;
+            z-index:1000;
+            display:none;
+            align-items:center;
+            justify-content:center;
+            padding:1.25rem;
+            background:rgba(15,23,42,.68);
+        }
+        .result-modal.is-open{
+            display:flex;
+        }
+        .result-modal-panel{
+            width:min(760px,100%);
+            max-height:90vh;
+            overflow:auto;
+            background:#fff;
+            border-radius:18px;
+            box-shadow:0 24px 80px rgba(15,23,42,.35);
+            padding:1rem;
+        }
+        .result-modal-header{
+            display:flex;
+            align-items:center;
+            justify-content:space-between;
+            gap:1rem;
+            margin-bottom:.75rem;
+        }
+        .result-modal-title{
+            font-size:1rem;
+            font-weight:800;
+            color:#0f172a;
+        }
+        .result-modal-close{
+            width:38px;
+            height:38px;
+            border:none;
+            border-radius:8px;
+            background:#e5e7eb;
+            color:#111827;
+            font-size:1.35rem;
+            line-height:1;
+            cursor:pointer;
+        }
+        .result-modal .result-card{
+            margin-top:0 !important;
+            border-radius:14px;
         }
         .scan-countdown{
             margin-top:.55rem;
@@ -1410,6 +1512,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     </div>
 </div>
 
+<?php if ($scanPopupResult !== null): ?>
+    <div class="result-modal" id="scanResultModal" data-auto-open="1" role="dialog" aria-modal="true" aria-labelledby="scanResultModalTitle">
+        <div class="result-modal-panel">
+            <div class="result-modal-header">
+                <div class="result-modal-title" id="scanResultModalTitle">Scan Complete</div>
+                <button type="button" class="result-modal-close" id="scanResultModalClose" aria-label="Close results">&times;</button>
+            </div>
+            <?php renderToolResultCard($scanPopupResult, $scanPopupTitle, $scanPopupContext); ?>
+        </div>
+    </div>
+<?php endif; ?>
+
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js"></script>
@@ -1462,16 +1576,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         const bmiForm = document.getElementById('bmiForm');
         const uploadPhotoForm = document.getElementById('uploadPhotoForm');
         const liveCameraForm = document.getElementById('liveCameraForm');
+        const scanResultModal = document.getElementById('scanResultModal');
+        const scanResultModalClose = document.getElementById('scanResultModalClose');
         const bmiSubmitBtn = document.getElementById('bmiSubmitBtn');
         const bmiActionStatus = document.getElementById('bmiActionStatus');
         const liveCameraSubmitBtn = document.getElementById('liveCameraSubmitBtn');
         const uploadPhotoSubmitBtn = document.getElementById('uploadPhotoSubmitBtn');
         const calculatorProfileMode = document.getElementById('calculator_profile_mode');
         const calculatorOtherFields = document.querySelectorAll('.calculator-other-field');
+        const calculatorGender = document.getElementById('calculator_gender');
         const calculatorHeightInput = document.getElementById('calculator_height_cm');
         const calculatorHeightUnit = document.getElementById('calculator_height_unit');
         const calculatorWeightInput = document.getElementById('calculator_weight_kg');
         const calculatorWeightUnit = document.getElementById('calculator_weight_unit');
+        const calculatorChestInput = document.getElementById('calculator_chest_cm');
+        const calculatorWaistInput = document.getElementById('calculator_waist_cm');
+        const calculatorHipsInput = document.getElementById('calculator_hips_cm');
         const toolMenuButtons = document.querySelectorAll('.tool-menu-btn');
         const toolPanels = document.querySelectorAll('[data-tool-panel]');
         const scannerToolPanels = document.querySelectorAll('[data-scanner-tool]');
@@ -1543,6 +1663,38 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         const photoSideCanvas = document.getElementById('photoSideCanvas');
         const cameraFrontPreview = document.getElementById('cameraFrontPreview');
         const cameraSidePreview = document.getElementById('cameraSidePreview');
+
+        function openScanResultModal() {
+            if (!scanResultModal) return;
+            scanResultModal.classList.add('is-open');
+            document.body.style.overflow = 'hidden';
+            if (scanResultModalClose) {
+                scanResultModalClose.focus();
+            }
+        }
+        function closeScanResultModal() {
+            if (!scanResultModal) return;
+            scanResultModal.classList.remove('is-open');
+            document.body.style.overflow = '';
+        }
+        if (scanResultModalClose) {
+            scanResultModalClose.addEventListener('click', closeScanResultModal);
+        }
+        if (scanResultModal) {
+            scanResultModal.addEventListener('click', function (e) {
+                if (e.target === scanResultModal) {
+                    closeScanResultModal();
+                }
+            });
+        }
+        document.addEventListener('keydown', function (e) {
+            if (e.key === 'Escape' && scanResultModal && scanResultModal.classList.contains('is-open')) {
+                closeScanResultModal();
+            }
+        });
+        if (scanResultModal && scanResultModal.dataset.autoOpen === '1') {
+            openScanResultModal();
+        }
 
         // Restore previous values (cm/kg) after POST
         if (heightHidden.value) {
@@ -1653,6 +1805,42 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 field.style.display = showOther ? 'block' : 'none';
             });
         }
+        function setHiddenValue(form, name, value) {
+            let input = form.querySelector(`input[type="hidden"][name="${name}"]`);
+            if (!input) {
+                input = document.createElement('input');
+                input.type = 'hidden';
+                input.name = name;
+                form.appendChild(input);
+            }
+            input.value = value || '';
+        }
+        function attachCalculatorProfile(form) {
+            if (!form || !calculatorProfileMode) return;
+            setHiddenValue(form, 'calculator_profile_mode', calculatorProfileMode.value);
+            setHiddenValue(form, 'calculator_gender', calculatorGender ? calculatorGender.value : '');
+            setHiddenValue(form, 'calculator_height_cm', calculatorHeightInput ? calculatorHeightInput.value : '');
+            setHiddenValue(form, 'calculator_height_unit', calculatorHeightUnit ? calculatorHeightUnit.value : 'cm');
+            setHiddenValue(form, 'calculator_weight_kg', calculatorWeightInput ? calculatorWeightInput.value : '');
+            setHiddenValue(form, 'calculator_weight_unit', calculatorWeightUnit ? calculatorWeightUnit.value : 'kg');
+            setHiddenValue(form, 'calculator_chest_cm', calculatorChestInput ? calculatorChestInput.value : '');
+            setHiddenValue(form, 'calculator_waist_cm', calculatorWaistInput ? calculatorWaistInput.value : '');
+            setHiddenValue(form, 'calculator_hips_cm', calculatorHipsInput ? calculatorHipsInput.value : '');
+            if (calculatorProfileMode.value === 'other' && calculatorHeightInput && calculatorWeightInput) {
+                const rawHeight = parseFloat(calculatorHeightInput.value);
+                const rawWeight = parseFloat(calculatorWeightInput.value);
+                if (!isNaN(rawHeight) && rawHeight > 0 && heightValue && heightHidden) {
+                    const heightCm = calculatorHeightUnit && calculatorHeightUnit.value === 'ft' ? feetToCm(rawHeight) : rawHeight;
+                    heightValue.value = heightCm.toFixed(1);
+                    heightHidden.value = heightCm.toFixed(1);
+                }
+                if (!isNaN(rawWeight) && rawWeight > 0 && weightValue && weightHidden) {
+                    const weightKg = calculatorWeightUnit && calculatorWeightUnit.value === 'lb' ? lbToKg(rawWeight) : rawWeight;
+                    weightValue.value = weightKg.toFixed(1);
+                    weightHidden.value = weightKg.toFixed(1);
+                }
+            }
+        }
         if (calculatorHeightUnit && calculatorHeightInput) {
             calculatorHeightUnit.addEventListener('change', function () {
                 const v = parseFloat(calculatorHeightInput.value);
@@ -1681,6 +1869,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
         if (bmiForm) {
             bmiForm.addEventListener('submit', function (e) {
+                attachCalculatorProfile(bmiForm);
                 const bmiReady = !isNaN(parseFloat(heightValue.value)) && parseFloat(heightValue.value) > 0 &&
                     !isNaN(parseFloat(weightValue.value)) && parseFloat(weightValue.value) > 0;
                 if (!bmiReady) {
@@ -1712,6 +1901,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         if (uploadPhotoForm) {
             uploadPhotoForm.addEventListener('submit', async function (e) {
+                attachCalculatorProfile(uploadPhotoForm);
                 const hasFront = !!(uploadFitXpressFrontPhotoInput && uploadFitXpressFrontPhotoInput.value);
                 const hasSide = !!(uploadFitXpressSidePhotoInput && uploadFitXpressSidePhotoInput.value);
                 if (!hasFront || !hasSide) {
@@ -1862,6 +2052,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         if (liveCameraForm) {
             liveCameraForm.addEventListener('submit', function (e) {
+                attachCalculatorProfile(liveCameraForm);
                 const hv = parseFloat(heightValue.value);
                 const wv = parseFloat(weightValue.value);
                 const hasCameraValues = Number(scanChestInput.value) > 0 && Number(scanWaistInput.value) > 0 && Number(scanHipsInput.value) > 0;

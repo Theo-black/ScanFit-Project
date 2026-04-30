@@ -5,3 +5,5 @@ __pycache__/
 *.pyc
 capstonestoredb.sql
 images/profiles/
+storage/sessions/*
+!storage/sessions/.htaccess

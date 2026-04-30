@@ -384,6 +384,7 @@ a{color:var(--app-accent);}
                     </a>
 
                     <a href="orders.php" class="sf-link">Orders</a>
+                    <a href="wishlist.php" class="sf-link">Wishlist</a>
 
                     <a href="settings.php#saved-sizes" style="text-decoration:none;">
                         <div class="sf-pill">

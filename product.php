@@ -60,6 +60,35 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['shopping_profile_acti
     exit();
 }
 
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['review_action'])) {
+    requireLogin();
+    requireCsrfPost('product.php?id=' . $id);
+    $rating = (int)($_POST['rating'] ?? 0);
+    $comment = trim((string)($_POST['comment'] ?? ''));
+    if ($rating < 1 || $rating > 5) {
+        $_SESSION['error'] = 'Select a rating from 1 to 5.';
+    } elseif (!saveProductReview(getCustomerId(), (int)$product['product_id'], $rating, $comment, $reviewError)) {
+        $_SESSION['error'] = $reviewError ?? 'Could not save review.';
+    } else {
+        $_SESSION['success'] = 'Review saved.';
+    }
+    header('Location: product.php?id=' . $id . '#product-reviews');
+    exit();
+}
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['wishlist_action'])) {
+    requireLogin();
+    requireCsrfPost('product.php?id=' . $id);
+    $enabled = (string)($_POST['wishlist_action'] ?? '') === 'add';
+    if (setProductWishlist(getCustomerId(), (int)$product['product_id'], $enabled)) {
+        $_SESSION['success'] = $enabled ? 'Added to wishlist.' : 'Removed from wishlist.';
+    } else {
+        $_SESSION['error'] = 'Could not update wishlist.';
+    }
+    header('Location: product.php?id=' . $id);
+    exit();
+}
+
 // Fetch variants into an array so we can use them in the form
 $variants = [];
 // Call helper function to get product variants for this product
@@ -166,6 +195,10 @@ unset($_SESSION['success'], $_SESSION['error']);
 
 $customerId = isLoggedIn() ? getCustomerId() : 0;
 $shoppingProfile = getShoppingProfileContext($customerId);
+$reviewSummary = getProductReviewSummary((int)$product['product_id']);
+$reviews = getProductReviews((int)$product['product_id']);
+$canReview = $customerId > 0 && customerCanReviewProduct($customerId, (int)$product['product_id']);
+$isWishlisted = $customerId > 0 && isProductWishlisted($customerId, (int)$product['product_id']);
 $recommendedShopSize = (string)($shoppingProfile['effective_size'] ?? '');
 $shoppingContextNote = '';
 if (($shoppingProfile['mode'] ?? 'self') === 'other') {
@@ -528,6 +561,18 @@ if ($recommendedShopSize !== '' && !$recommendedSizeAvailable) {
             transform:translateY(-2px);
             box-shadow:0 18px 40px rgba(102,126,234,.45);
         }
+        .wishlist-btn{
+            width:100%;
+            padding:.85rem 1rem;
+            margin-top:.75rem;
+            border:2px solid #667eea;
+            border-radius:16px;
+            background:#fff;
+            color:#4f46e5;
+            font-size:.95rem;
+            font-weight:800;
+            cursor:pointer;
+        }
 
         /* Badge shown when variants are limited or unavailable */
         .badge-out{
@@ -558,6 +603,58 @@ if ($recommendedShopSize !== '' && !$recommendedSizeAvailable) {
             font-size:.9rem;
             margin:1rem 0 1.5rem;
         }
+        .reviews-card{
+            max-width:1200px;
+            margin:2rem auto 0;
+            background:#fff;
+            border-radius:20px;
+            padding:1.6rem;
+            box-shadow:0 10px 30px rgba(0,0,0,.08);
+        }
+        .reviews-head{
+            display:flex;
+            justify-content:space-between;
+            gap:1rem;
+            align-items:center;
+            flex-wrap:wrap;
+            margin-bottom:1rem;
+        }
+        .rating-summary{
+            font-weight:800;
+            color:#2c3e50;
+        }
+        .review-form{
+            display:grid;
+            gap:.75rem;
+            margin:1rem 0;
+            padding:1rem;
+            border:1px solid #e5e7eb;
+            border-radius:14px;
+            background:#f8fafc;
+        }
+        .review-form select,
+        .review-form textarea{
+            width:100%;
+            padding:.8rem .9rem;
+            border-radius:12px;
+            border:2px solid #e1e4e8;
+            font:inherit;
+        }
+        .review-form textarea{min-height:90px;resize:vertical}
+        .review-item{
+            padding:1rem 0;
+            border-top:1px solid #e5e7eb;
+        }
+        .review-meta{
+            display:flex;
+            justify-content:space-between;
+            gap:1rem;
+            flex-wrap:wrap;
+            font-weight:800;
+            color:#2c3e50;
+            margin-bottom:.35rem;
+        }
+        .review-stars{color:#b45309}
 
         /* Section heading label above product info */
         .section-heading{
@@ -814,8 +911,75 @@ if ($recommendedShopSize !== '' && !$recommendedSizeAvailable) {
                     </div>
                 <?php endif; ?>
             </form>
+            <?php if (isLoggedIn()): ?>
+                <form method="POST">
+                    <?php echo csrfInput(); ?>
+                    <input type="hidden" name="wishlist_action" value="<?php echo $isWishlisted ? 'remove' : 'add'; ?>">
+                    <button type="submit" class="wishlist-btn">
+                        <?php echo $isWishlisted ? 'Remove from Wishlist' : 'Add to Wishlist'; ?>
+                    </button>
+                </form>
+            <?php else: ?>
+                <a href="login.php" class="wishlist-btn" style="display:block;text-align:center;text-decoration:none;">Log in to Save</a>
+            <?php endif; ?>
         </div>
     </div>
+</div>
+
+<div class="reviews-card" id="product-reviews">
+    <div class="reviews-head">
+        <div>
+            <div class="section-heading"><span>Customer</span> Reviews</div>
+            <h2 style="color:#2c3e50">Reviews</h2>
+        </div>
+        <div class="rating-summary">
+            <?php if ($reviewSummary['review_count'] > 0): ?>
+                <?php echo number_format((float)$reviewSummary['average_rating'], 1); ?>/5
+                from <?php echo (int)$reviewSummary['review_count']; ?> review<?php echo $reviewSummary['review_count'] === 1 ? '' : 's'; ?>
+            <?php else: ?>
+                No reviews yet
+            <?php endif; ?>
+        </div>
+    </div>
+
+    <?php if ($canReview): ?>
+        <form method="POST" class="review-form">
+            <?php echo csrfInput(); ?>
+            <input type="hidden" name="review_action" value="save">
+            <label>
+                Rating
+                <select name="rating" required>
+                    <option value="">Select rating</option>
+                    <?php for ($ratingOption = 5; $ratingOption >= 1; $ratingOption--): ?>
+                        <option value="<?php echo $ratingOption; ?>"><?php echo $ratingOption; ?> star<?php echo $ratingOption === 1 ? '' : 's'; ?></option>
+                    <?php endfor; ?>
+                </select>
+            </label>
+            <label>
+                Comment
+                <textarea name="comment" maxlength="1000" placeholder="Share how it fit, felt, or looked."></textarea>
+            </label>
+            <button type="submit" class="shopping-profile-btn" style="width:max-content;">Save Review</button>
+        </form>
+    <?php elseif (isLoggedIn()): ?>
+        <p class="variant-note">Reviews open after this product is delivered in one of your orders.</p>
+    <?php else: ?>
+        <p class="variant-note"><a href="login.php">Log in</a> to review delivered purchases.</p>
+    <?php endif; ?>
+
+    <?php if ($reviews && mysqli_num_rows($reviews) > 0): ?>
+        <?php while ($review = mysqli_fetch_assoc($reviews)): ?>
+            <div class="review-item">
+                <div class="review-meta">
+                    <span><?php echo htmlspecialchars(trim((string)$review['first_name'] . ' ' . (string)$review['last_name'])); ?></span>
+                    <span class="review-stars"><?php echo str_repeat('*', (int)$review['rating']); ?> <?php echo (int)$review['rating']; ?>/5</span>
+                </div>
+                <?php if (trim((string)($review['comment'] ?? '')) !== ''): ?>
+                    <p><?php echo nl2br(htmlspecialchars((string)$review['comment'])); ?></p>
+                <?php endif; ?>
+            </div>
+        <?php endwhile; ?>
+    <?php endif; ?>
 </div>
 
 <script>

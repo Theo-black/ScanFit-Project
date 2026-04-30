@@ -82,6 +82,7 @@ try {
     }
 
     mysqli_commit($conn);
+    sendOrderCustomerEmail($orderId, 'cancelled');
     header('Location: order_view_admin.php?id=' . $orderId . '&cancelled=1');
     exit();
 } catch (Exception $e) {
