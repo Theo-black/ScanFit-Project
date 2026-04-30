@@ -7,3 +7,5 @@ capstonestoredb.sql
 images/profiles/
 storage/sessions/*
 !storage/sessions/.htaccess
+storage/emails/*
+!storage/emails/.htaccess

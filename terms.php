@@ -1,6 +1,7 @@
 <?php
 require_once 'functions.php';
 $version = getTermsAgreementVersion();
+$continueUrl = 'register.php?terms_read=1';
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -20,6 +21,17 @@ $version = getTermsAgreementVersion();
         .meta{color:#6b7280;margin-bottom:1.4rem}
         a{color:#4f46e5;font-weight:700;text-decoration:none}
         a:hover{text-decoration:underline}
+        .actions{
+            position:sticky;bottom:0;margin-top:2rem;padding-top:1rem;
+            background:linear-gradient(180deg,rgba(255,255,255,.72),#fff 38%);
+            display:flex;justify-content:flex-end;gap:.75rem;flex-wrap:wrap
+        }
+        .continue-btn{
+            display:inline-block;border:none;border-radius:10px;padding:.9rem 1.2rem;
+            background:#4f46e5;color:#fff!important;font-weight:800;text-decoration:none;
+            box-shadow:0 10px 22px rgba(79,70,229,.22)
+        }
+        .continue-btn:hover{text-decoration:none;background:#4338ca}
     </style>
 </head>
 <body>
@@ -111,6 +123,10 @@ $version = getTermsAgreementVersion();
         <p>
             Questions about these terms can be sent through the <a href="contact.php">contact page</a>.
         </p>
+
+        <div class="actions">
+            <a class="continue-btn" href="<?php echo htmlspecialchars($continueUrl); ?>">Continue to Create Account</a>
+        </div>
     </article>
 </main>
 </body>

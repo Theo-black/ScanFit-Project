@@ -1170,6 +1170,51 @@ function sendEmailViaSmtp(string $to, string $subject, string $htmlBody, string 
     }
 }
 
+function localEmailFileFallbackEnabled(): bool
+{
+    $value = strtolower(trim((string)(getenv('SCANFIT_EMAIL_FILE_FALLBACK') ?: '')));
+    return in_array($value, ['1', 'true', 'yes', 'on'], true);
+}
+
+function saveEmailToLocalFile(string $to, string $subject, string $htmlBody, string $textBody): bool
+{
+    if (!localEmailFileFallbackEnabled()) {
+        return false;
+    }
+
+    $emailDir = __DIR__ . DIRECTORY_SEPARATOR . 'storage' . DIRECTORY_SEPARATOR . 'emails';
+    if (!is_dir($emailDir) && !mkdir($emailDir, 0775, true)) {
+        error_log('Local email fallback failed: could not create storage/emails.');
+        return false;
+    }
+
+    $htaccessPath = $emailDir . DIRECTORY_SEPARATOR . '.htaccess';
+    if (!is_file($htaccessPath)) {
+        @file_put_contents($htaccessPath, "Deny from all\n");
+    }
+
+    $safeSubject = preg_replace('/[^A-Za-z0-9._-]+/', '_', $subject) ?: 'email';
+    $fileName = date('Ymd_His') . '_' . bin2hex(random_bytes(4)) . '_' . substr($safeSubject, 0, 60) . '.txt';
+    $filePath = $emailDir . DIRECTORY_SEPARATOR . $fileName;
+    $content = "To: {$to}\n";
+    $content .= "Subject: {$subject}\n";
+    $content .= "Created: " . date('c') . "\n\n";
+    $content .= "Plain text body:\n{$textBody}\n\n";
+    $content .= "HTML body:\n{$htmlBody}\n";
+
+    if (file_put_contents($filePath, $content) === false) {
+        error_log('Local email fallback failed: could not write email file.');
+        return false;
+    }
+
+    if (session_status() === PHP_SESSION_ACTIVE) {
+        $_SESSION['last_local_email_file'] = 'storage/emails/' . $fileName;
+    }
+
+    error_log('Local email fallback saved: ' . $filePath);
+    return true;
+}
+
 function sendAppEmail(string $to, string $subject, string $htmlBody, ?string $textBody = null): bool
 {
     $to = trim($to);
@@ -1182,7 +1227,15 @@ function sendAppEmail(string $to, string $subject, string $htmlBody, ?string $te
     }
 
     if (isSmtpConfigured()) {
-        return sendEmailViaSmtp($to, $subject, $htmlBody, $textBody);
+        if (sendEmailViaSmtp($to, $subject, $htmlBody, $textBody)) {
+            return true;
+        }
+
+        if (saveEmailToLocalFile($to, $subject, $htmlBody, $textBody)) {
+            return true;
+        }
+
+        return false;
     }
 
     $fromAddress = getMailFromAddress();
@@ -1203,7 +1256,11 @@ function sendAppEmail(string $to, string $subject, string $htmlBody, ?string $te
     $message .= $htmlBody . "\r\n\r\n";
     $message .= "--{$boundary}--\r\n";
 
-    return @mail($to, $subject, $message, implode("\r\n", $headers));
+    if (@mail($to, $subject, $message, implode("\r\n", $headers))) {
+        return true;
+    }
+
+    return saveEmailToLocalFile($to, $subject, $htmlBody, $textBody);
 }
 
 function getAdminNotificationEmail(): string
@@ -1303,6 +1360,10 @@ function sendCustomerVerificationEmail(int $customerId, string $email, string $f
     }
 
     $verificationUrl = buildEmailVerificationLink($token);
+    if (session_status() === PHP_SESSION_ACTIVE && localEmailFileFallbackEnabled()) {
+        $_SESSION['last_demo_verification_url'] = $verificationUrl;
+    }
+
     $safeFirstName = htmlspecialchars($firstName, ENT_QUOTES, 'UTF-8');
     $safeUrl = htmlspecialchars($verificationUrl, ENT_QUOTES, 'UTF-8');
     $htmlBody = '
@@ -1362,6 +1423,10 @@ function sendPendingCustomerSignupVerificationEmail(int $pendingSignupId, string
     }
 
     $verificationUrl = buildEmailVerificationLink($token, 'manual_signup');
+    if (session_status() === PHP_SESSION_ACTIVE && localEmailFileFallbackEnabled()) {
+        $_SESSION['last_demo_verification_url'] = $verificationUrl;
+    }
+
     $safeFirstName = htmlspecialchars($firstName, ENT_QUOTES, 'UTF-8');
     $safeUrl = htmlspecialchars($verificationUrl, ENT_QUOTES, 'UTF-8');
     $htmlBody = '
@@ -1579,6 +1644,10 @@ function sendPendingGoogleSignupVerificationEmail(int $pendingSignupId, string $
     }
 
     $verificationUrl = buildEmailVerificationLink($token, 'google_signup');
+    if (session_status() === PHP_SESSION_ACTIVE && localEmailFileFallbackEnabled()) {
+        $_SESSION['last_demo_verification_url'] = $verificationUrl;
+    }
+
     $safeFirstName = htmlspecialchars($firstName, ENT_QUOTES, 'UTF-8');
     $safeUrl = htmlspecialchars($verificationUrl, ENT_QUOTES, 'UTF-8');
     $htmlBody = '

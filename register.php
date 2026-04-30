@@ -13,6 +13,8 @@ if (isLoggedIn()) {
 // Initialize feedback message placeholders
 $error = null;
 $success = null;
+$demoVerificationUrl = '';
+$termsRead = isset($_GET['terms_read']) && $_GET['terms_read'] === '1';
 
 if (!empty($_SESSION['error']) && is_string($_SESSION['error'])) {
     $error = $_SESSION['error'];
@@ -21,6 +23,10 @@ if (!empty($_SESSION['error']) && is_string($_SESSION['error'])) {
 if (!empty($_SESSION['success']) && is_string($_SESSION['success'])) {
     $success = $_SESSION['success'];
     unset($_SESSION['success']);
+}
+if (!empty($_SESSION['last_demo_verification_url']) && is_string($_SESSION['last_demo_verification_url'])) {
+    $demoVerificationUrl = $_SESSION['last_demo_verification_url'];
+    unset($_SESSION['last_demo_verification_url']);
 }
 
 // Handle form submission only when the request method is POST
@@ -59,6 +65,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         } else {
             if (sendPendingCustomerSignupVerificationEmail($pendingSignupId, $email, $firstName)) {
                 $success = 'Check your email and verify the link to finish creating your account.';
+                if (!empty($_SESSION['last_local_email_file']) && localEmailFileFallbackEnabled()) {
+                    $success .= ' Local demo copy saved to ' . $_SESSION['last_local_email_file'] . '.';
+                    unset($_SESSION['last_local_email_file']);
+                }
+                if (!empty($_SESSION['last_demo_verification_url']) && localEmailFileFallbackEnabled()) {
+                    $demoVerificationUrl = $_SESSION['last_demo_verification_url'];
+                    unset($_SESSION['last_demo_verification_url']);
+                }
                 $_POST = [];
             } else {
                 $error = 'Registration started, but we could not send the verification email. Please contact support.';
@@ -129,6 +143,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             background:#dcfce7;color:#166534;padding:1rem;
             border-radius:12px;margin-bottom:1.5rem;text-align:center
         }
+        .success-msg a{color:#14532d;font-weight:800}
+        .info-msg{
+            background:#eef2ff;color:#3730a3;padding:1rem;
+            border-radius:12px;margin-bottom:1.5rem;text-align:center
+        }
         /* Submit button styling */
         .submit-btn{
             width:100%;padding:1.2rem;border:none;border-radius:15px;
@@ -181,7 +200,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             <div class="error-msg"><?php echo htmlspecialchars($error); ?></div>
         <?php endif; ?>
         <?php if ($success): ?>
-            <div class="success-msg"><?php echo htmlspecialchars($success); ?></div>
+            <div class="success-msg">
+                <?php echo htmlspecialchars($success); ?>
+                <?php if ($demoVerificationUrl): ?>
+                    <br><a href="<?php echo htmlspecialchars($demoVerificationUrl); ?>">Open demo verification link</a>
+                <?php endif; ?>
+            </div>
+        <?php endif; ?>
+        <?php if ($termsRead): ?>
+            <div class="info-msg">Thanks for reading the agreement. Check the box below when you are ready to continue.</div>
         <?php endif; ?>
 
         <!-- User registration form -->
@@ -232,27 +259,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 <input type="checkbox" name="accept_terms" value="1" required <?php echo !empty($_POST['accept_terms']) ? 'checked' : ''; ?>>
                 <span>
                     I have read and agree to the
-                    <a href="terms.php" target="_blank" rel="noopener">ScanFit License Agreement and Terms &amp; Conditions</a>.
+                    <a href="terms.php">ScanFit License Agreement and Terms &amp; Conditions</a>.
                 </span>
             </label>
 
             <!-- Submit button to create the account -->
             <button type="submit" class="submit-btn">Create Account</button>
-        </form>
 
-        <?php if (isGoogleOAuthConfigured()): ?>
-            <form method="POST" action="google_login.php?mode=signup">
-                <?php echo csrfInput(); ?>
-                <label class="terms-box">
-                    <input type="checkbox" name="accept_terms" value="1" required>
-                    <span>
-                        I have read and agree to the
-                        <a href="terms.php" target="_blank" rel="noopener">ScanFit License Agreement and Terms &amp; Conditions</a>.
-                    </span>
-                </label>
-                <button type="submit" class="google-btn">Sign up with Google</button>
-            </form>
-        <?php endif; ?>
+            <?php if (isGoogleOAuthConfigured()): ?>
+                <button type="submit" class="google-btn" formaction="google_login.php?mode=signup" formnovalidate>Sign up with Google</button>
+            <?php endif; ?>
+        </form>
 
         <!-- Link to login page for existing users -->
         <div class="login-link">
